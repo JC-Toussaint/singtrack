@@ -576,7 +576,7 @@ int main(int argc, char* argv[]) {
     
     std::ofstream f_vol("all_volume_bloch_points.txt");
     if (f_vol.is_open()) {
-        f_vol << std::left  << std::setw(8)  << "iter"
+        f_vol << std::left  << std::setw(8)  << "#iter"
               << std::setw(15) << "time"
               << std::right << std::setw(10) << "x" << std::setw(10) << "y" << std::setw(10) << "z"
               << std::setw(10) << "curl_x" << std::setw(10) << "curl_y" << std::setw(10) << "curl_z"
@@ -600,7 +600,7 @@ int main(int argc, char* argv[]) {
 
     std::ofstream f_surf("all_surface_singularities.txt");
     if (f_surf.is_open()) {
-        f_surf << std::left  << std::setw(8)  << "iter"
+        f_surf << std::left  << std::setw(8)  << "#iter"
                << std::setw(15) << "time"
                << std::right << std::setw(10) << "x" << std::setw(10) << "y" << std::setw(10) << "z"
                << std::setw(12) << "curl_n" 
