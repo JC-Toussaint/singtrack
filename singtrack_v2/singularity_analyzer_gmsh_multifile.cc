@@ -22,7 +22,6 @@ namespace fs = std::filesystem;
 using Matrix34d = Eigen::Matrix<double, 3, 4>;
 
 // --- CONFIGURATION & PARAMÈTRES ---
-const std::string MSH_FILE = "cylinder49847.msh";
 const std::string DIRECTORY_PATH = "."; // Dossier où se trouvent les fichiers *.sol ('.' signifie dossier courant)
 const double TOL = 1e-16;
 
@@ -388,7 +387,15 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
 }
 
 // --- MAIN ---
-int main() {
+int main(int argc, char* argv[]) {
+    // 0. Récupération du fichier maillage (.msh) depuis la ligne de commande
+    if (argc < 2) {
+        std::cerr << "Erreur : Nom du fichier maillage (.msh) manquant.\n";
+        std::cerr << "Usage   : " << argv[0] << " <chemin_du_fichier_maillage.msh>\n";
+        return 1;
+    }
+    std::string msh_file = argv[1];
+
     // 1. Lister tous les fichiers sol*.in et extraire l'indice d'itération
     std::vector<std::pair<int, std::string>> sol_files;
     
@@ -436,10 +443,10 @@ int main() {
     }
 
     // 3. CHARGEMENT ET CORRECTION DU MAILLAGE (UNE SEULE FOIS)
-    std::cout << "Chargement unique du maillage : " << MSH_FILE << "...\n";
+    std::cout << "Chargement unique du maillage : " << msh_file << "...\n";
     Mesh mesh;
     try {
-        mesh = load_mesh_gmsh(MSH_FILE, initial_mag.rows());
+        mesh = load_mesh_gmsh(msh_file, initial_mag.rows());
     } catch (const std::exception& e) {
         std::cerr << "Erreur de maillage : " << e.what() << "\n";
         return 1;
@@ -513,12 +520,11 @@ int main() {
         }
     }
 
-    // 5. SAUVEGARDE GLOBALE COMPLETE (Toutes les variables sont exportées)
+    // 5. SAUVEGARDE GLOBALE COMPLETE
     std::cout << "\n---------------------------------------------\nExécution de l'export final...\n";
     
     std::ofstream f_vol("all_volume_bloch_points.txt");
     if (f_vol.is_open()) {
-        // En-tête détaillé pour le Volume (les valeurs propres sont scindées en Réel et Imaginaire pour chaque dimension)
         f_vol << std::left  << std::setw(8)  << "iter"
               << std::setw(15) << "time"
               << std::right << std::setw(10) << "x" << std::setw(10) << "y" << std::setw(10) << "z"
@@ -543,7 +549,6 @@ int main() {
 
     std::ofstream f_surf("all_surface_singularities.txt");
     if (f_surf.is_open()) {
-        // En-tête détaillé pour la Surface (curl normalisé, polarité et les 2 valeurs propres décomposées)
         f_surf << std::left  << std::setw(8)  << "iter"
                << std::setw(15) << "time"
                << std::right << std::setw(10) << "x" << std::setw(10) << "y" << std::setw(10) << "z"
