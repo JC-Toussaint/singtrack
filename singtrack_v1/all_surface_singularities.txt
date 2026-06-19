@@ -1,0 +1,16 @@
+iter                 x           y           z  type
+         0       6.354      -1.495     -50.000  spiral source
+         0      -2.113       3.660     -50.000  spiral source
+         0      -6.354      -1.495      50.000  spiral source
+         0       2.113       3.660      50.000  spiral source
+         0       0.774       5.000      50.000  spiral source
+       100       6.354      -1.495     -50.000  spiral source
+       100      -2.113       3.660     -50.000  spiral source
+       100      -6.354      -1.495      50.000  spiral source
+       100       2.113       3.660      50.000  spiral source
+       100       0.774       5.000      50.000  spiral source
+       200       6.354      -1.495     -50.000  spiral source
+       200      -2.113       3.660     -50.000  spiral source
+       200      -6.354      -1.495      50.000  spiral source
+       200       2.113       3.660      50.000  spiral source
+       200       0.774       5.000      50.000  spiral source

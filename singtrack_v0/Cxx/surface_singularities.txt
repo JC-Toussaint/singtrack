@@ -1,0 +1,6 @@
+time(ns)	x	y	z	type	polarity
+0	6.35363	-1.49519	-50	spiral source	0
+0	-2.11325	3.66025	-50	spiral source	0
+0	-6.35363	-1.49519	50	spiral source	0
+0	2.11325	3.66025	50	spiral source	0
+0	0.773503	5	50	spiral source	0
