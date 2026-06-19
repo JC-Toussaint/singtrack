@@ -14,6 +14,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #include <regex>
+#include <chrono>
 
 // Inclusion de l'API Gmsh
 #include <gmsh.h>
@@ -494,6 +495,7 @@ int main(int argc, char* argv[]) {
     }
 
     // 3. CHARGEMENT ET CORRECTION DU MAILLAGE (UNE SEULE FOIS)
+    auto mesh_start = std::chrono::high_resolution_clock::now();
     std::cout << "Chargement unique du maillage : " << msh_file << "...\n";
     Mesh mesh;
     try {
@@ -503,12 +505,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     mesh.triangles = orient_triangles_outward(mesh.points, mesh.tetrahedrons, mesh.triangles);
+    auto mesh_end = std::chrono::high_resolution_clock::now(); // <-- FIN CHRONO
+    std::chrono::duration<double> mesh_duration = mesh_end - mesh_start;
+    std::cout << "=> Temps de traitement du maillage : " << mesh_duration.count() << " secondes.\n";
 
     // Conteneurs globaux pour accumuler tous les pas de temps
     std::vector<BlochPointResult> global_bloch_points;
     std::vector<SurfaceSingularityResult> global_surface_singularities;
 
     // 4. BOUCLE SUR TOUTES LES SOLUTIONS
+    auto sol_start = std::chrono::high_resolution_clock::now(); 
     for (const auto& [iter, file_path] : sol_files) {
         double current_time = 0.0;
         Eigen::MatrixXd mag;
@@ -571,6 +577,11 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    auto sol_end = std::chrono::high_resolution_clock::now(); 
+    std::chrono::duration<double> sol_duration = sol_end - sol_start;
+    std::cout << "\n=> Temps total de traitement de tous les fichiers .sol : "
+              << sol_duration.count() << " secondes.\n";
+
     // 5. SAUVEGARDE GLOBALE COMPLETE
     std::cout << "\n---------------------------------------------\nExécution de l'export final...\n";
     
@@ -624,5 +635,10 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "Analyses multi-fichiers et exports complets terminés.\n";
+    std::cout << "\n===== BILAN DES TEMPS DE CALCUL =====" << std::endl;
+    std::cout << "Lecture & correction maillage : " << mesh_duration.count() << " s" << std::endl;
+    std::cout << "Traitement des fichiers .sol   : " << sol_duration.count() << " s" << std::endl;
+    std::cout << "Temps calcul total d'analyse  : " << (mesh_duration.count() + sol_duration.count()) << " s" << std::endl;
+    std::cout << "=====================================\n" << std::endl;
     return 0;
 }
