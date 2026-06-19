@@ -324,10 +324,10 @@ std::unique_ptr<BlochPointResult> analyze_bloch_point(int current_iter, double c
         jac.row(1) = coeff_y.tail<3>();
         jac.row(2) = coeff_z.tail<3>();
 
-        double curl_x = coeff_y[3] - coeff_z[2];
-        double curl_y = coeff_z[1] - coeff_x[3];
-        double curl_z = coeff_x[2] - coeff_y[1];
-
+	double curl_x = coeff_z[2] - coeff_y[3]; // dm_z/dy - dm_y/dz
+	double curl_y = coeff_x[3] - coeff_z[1]; // dm_x/dz - dm_z/dx
+	double curl_z = coeff_y[1] - coeff_x[2]; // dm_y/dx - dm_x/dy
+					 
         Eigen::EigenSolver<Eigen::Matrix3d> es(jac);
         Eigen::Vector3cd eigvals = es.eigenvalues();
 
