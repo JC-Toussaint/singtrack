@@ -1,0 +1,140 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[french]{babel}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{hyperref}
+
+\geometry{margin=2.5cm}
+
+\title{Formulation Mathématique et Algorithmique de l'Analyseur de Singularités Micromagnétiques}
+\author{Micromagnétisme}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Ce document détaille les fondements mathématiques et les développements analytiques implémentés dans l'analyseur de singularités micromagnétiques tridimensionnelles. Le code traite deux types majeurs de défauts topologiques au sein de structures discrétisées en éléments finis (maillages GMSH) : les points de Bloch (singularités de volume à trois dimensions) et les singularités de surface (vortex et antivortex à deux dimensions). Nous explicitons ici les formulations d'interpolation linéaire, le calcul des matrices jacobiennes, l'extraction du rotationnel ainsi que les critères stricts de classification basés sur l'analyse spectrale des opérateurs de dérive.
+\end{abstract}
+
+\section{Introduction et Formalisme Général}
+En micromagnétisme, la distribution spatiale de l'aimantation est modélisée par un champ vectoriel continu $\mathbf{m}(\mathbf{r}) = (m_x, m_y, m_z)^T$. Ce champ est soumis à une contrainte de norme unitaire en presque tout point du matériau : $\|\mathbf{m}(\mathbf{r})\| = 1$. Cependant, des configurations physiques particulières font apparaître des singularités topologiques où le champ continu s'annule localement, ou subit des transitions abruptes à la surface.
+
+L'algorithme traite un maillage tridimensionnel composé de tétraèdres de premier ordre. Dans chaque élément, le champ d'aimantation et les coordonnées géométriques sont interpolés linéairement à partir de leurs valeurs aux nœuds de l'élément.
+
+\section{Analyse et Détection des Points de Bloch (Volume)}
+Un point de Bloch est une singularité ponctuelle tridimensionnelle caractérisée par une annulation stricte de l'aimantation locale, soit $\mathbf{m}(\mathbf{r}_{sol}) = \mathbf{0}$, signifiant simultanément :
+\begin{equation}
+m_x(x,y,z) = 0, \quad m_y(x,y,z) = 0, \quad m_z(x,y,z) = 0
+\end{equation}
+
+\subsection{Condition Nécessaire de Changement de Signe}
+Avant d'effectuer une résolution rigoureuse, l'algorithme applique un filtre topologique rapide. Pour qu'un point d'annulation puisse exister à l'intérieur du domaine d'un tétraèdre, il est mathématiquement nécessaire que chaque composante du vecteur d'aimantation change de signe parmi les quatre nœuds de l'élément. Soit $V_e$ l'ensemble des quatre nœuds d'un tétraèdre, la condition s'exprime par :
+\begin{equation}
+\min_{i \in V_e}(m_{x,i}) \times \max_{i \in V_e}(m_{x,i}) \le 0
+\end{equation}
+\begin{equation}
+\min_{i \in V_e}(m_{y,i}) \times \max_{i \in V_e}(m_{y,i}) \le 0
+\end{equation}
+\begin{equation}
+\min_{i \in V_e}(m_{z,i}) \times \max_{i \in V_e}(m_{z,i}) \le 0
+\end{equation}
+
+\subsection{Inversion dans l'Espace de l'Aimantation}
+Si la condition de changement de signe est validée, on définit un repère local basé sur le nœud d'indice 0. Toute position dans l'espace de l'aimantation peut s'exprimer par rapport à ce nœud via les coordonnées barycentriques $\boldsymbol{\xi} = (\xi_1, \xi_2, \xi_3)^T$. La condition d'annulation s'écrit sous la forme du système linéaire suivant :
+\begin{equation}
+\mathbf{m}(\boldsymbol{\xi}) = \mathbf{m}_0 + \mathbf{A}_m \boldsymbol{\xi} = \mathbf{0}
+\end{equation}
+où la matrice de transformation de l'aimantation $\mathbf{A}_m \in \mathbb{R}^{3 \times 3}$ est construite par les variations d'aimantation le long des arêtes de l'élément :
+\begin{equation}
+\mathbf{A}_m = \begin{bmatrix} \mathbf{m}_1 - \mathbf{m}_0 & \mathbf{m}_2 - \mathbf{m}_0 & \mathbf{m}_3 - \mathbf{m}_0 \end{bmatrix}
+\end{equation}
+Sous réserve que la matrice soit inversible ($\det(\mathbf{A}_m) \neq 0$), la position de la singularité dans l'espace local de référence est obtenue par :
+\begin{equation}
+\boldsymbol{\xi} = - \mathbf{A}_m^{-1} \mathbf{m}_0
+\end{equation}
+
+\subsection{Critère d'Inclusion Spatiale}
+Le point d'annulation calculé appartient physiquement au volume du tétraèdre si et seulement si ses coordonnées barycentriques respectent strictement le domaine géométrique de l'élément canonique :
+\begin{equation}
+\xi_1 > 0, \quad \xi_2 > 0, \quad \xi_3 > 0 \quad \text{et} \quad \xi_1 + \xi_2 + \xi_3 < 1
+\end{equation}
+
+\subsection{Mapping vers l'Espace Cartésien Réel}
+Une fois le vecteur $\boldsymbol{\xi}$ validé, la position cartésienne réelle de la singularité, notée $\mathbf{r}_{sol} = (x_{sol}, y_{sol}, z_{sol})^T$, est extraite en appliquant la matrice géométrique $\mathbf{B}_{geo} \in \mathbb{R}^{3 \times 3}$ :
+\begin{equation}
+\mathbf{r}_{sol} = \mathbf{r}_0 + \mathbf{B}_{geo} \boldsymbol{\xi}
+\end{equation}
+avec :
+\begin{equation}
+\mathbf{B}_{geo} = \begin{bmatrix} \mathbf{r}_1 - \mathbf{r}_0 & \mathbf{r}_2 - \mathbf{r}_0 & \mathbf{r}_3 - \mathbf{r}_0 \end{bmatrix}
+\end{equation}
+
+\subsection{Extraction du Gradient Spatial et de la Matrice Jacobienne}
+Pour classifier la nature topologique de la singularité, il est indispensable de connaître les dérivées partielles spatiales du champ au point considéré. On pose l'hypothèse d'une approximation affine globale sur l'élément : $m_i(\mathbf{r}) = c_{i,0} + c_{i,1}x + c_{i,2}y + c_{i,3}z$. On construit la matrice de Vandermonde spatiale augmentée $\mathbf{A}_{space} \in \mathbb{R}^{4 \times 4}$ :
+\begin{equation}
+\mathbf{A}_{space} = \begin{bmatrix}
+1 & x_0 & y_0 & z_0 \\
+1 & x_1 & y_1 & z_1 \\
+1 & x_2 & y_2 & z_2 \\
+1 & x_3 & y_3 & z_3
+\end{bmatrix}
+\end{equation}
+Les vecteurs de coefficients pour chaque composante $\mathbf{c}_x, \mathbf{c}_y, \mathbf{c}_z \in \mathbb{R}^4$ sont identifiés en inversant $\mathbf{A}_{space}$ :
+\begin{equation}
+\mathbf{c}_x = \mathbf{A}_{space}^{-1} \mathbf{M}_{\bullet,0} , \quad \mathbf{c}_y = \mathbf{A}_{space}^{-1} \mathbf{M}_{\bullet,1} , \quad \mathbf{c}_z = \mathbf{A}_{space}^{-1} \mathbf{M}_{\bullet,2}
+\end{equation}
+où $\mathbf{M}$ désigne la matrice des aimantations aux nœuds. La matrice jacobienne du système, représentée par le tenseur des gradients $\mathbf{J} = \nabla\mathbf{m}$, se compose des dérivées spatiales calculées :
+\begin{equation}
+\mathbf{J} = \begin{bmatrix}
+\partial_x m_x & \partial_y m_x & \partial_z m_x \\
+\partial_x m_y & \partial_y m_y & \partial_z m_y \\
+\partial_x m_z & \partial_y m_z & \partial_z m_z
+\end{bmatrix} = \begin{bmatrix}
+c_{x,1} & c_{x,2} & c_{x,3} \\
+c_{y,1} & c_{y,2} & c_{y,3} \\
+c_{z,1} & c_{z,2} & c_{z,3}
+\end{bmatrix}
+\end{equation}
+
+\subsection{Calcul du Rotationnel (Curl)}
+Le vecteur rotationnel $\nabla \times \mathbf{m}$ caractérise la chiralité de la structure de spin autour de la singularité. Ses composantes sont déduites directement de la partie antisymétrique de la matrice jacobienne :
+\begin{equation}
+\nabla \times \mathbf{m} = \begin{bmatrix}
+\partial_y m_z - \partial_z m_y \\
+\partial_z m_x - \partial_x m_z \\
+\partial_x m_y - \partial_y m_x
+\end{bmatrix} = \begin{bmatrix}
+c_{z,2} - c_{y,3} \\
+c_{x,3} - c_{z,1} \\
+c_{y,1} - c_{x,2}
+\end{bmatrix}
+\end{equation}
+
+\subsection{Classification Spectrale du Point de Bloch}
+L'analyse des valeurs propres de $\mathbf{J}$, notées $\lambda_1, \lambda_2, \lambda_3$, permet de classifier la dynamique topologique :
+\begin{itemize}
+    \item \textbf{Valeurs propres réelles :} Signes identiques positifs (Source), négatifs (Puits/Sink), ou mixtes (Selle/Saddle).
+    \item \textbf{Complexes conjugués ($\alpha \pm i\beta$) :} Indique un comportement enroulé de type Source spirale ou Selle spirale (Head-to-head / Tail-to-tail).
+\end{itemize}
+
+\section{Analyse et Détection des Singularités de Surface}
+Les singularités de surface se manifestent sur les facettes triangulaires externes de la structure lorsque la projection du moment magnétique dans le plan de la surface s'annule.
+
+\subsection{Projection Cylindrique et Localisation}
+Pour une facette définie par trois nœuds de surface, les aimantations sont projetées dans un système de coordonnées cylindriques locales de surface, générant la composante azimutale $m_\phi$ et axiale $m_z$. Le zéro est localisé via un système d'interpolation linéaire 2D résolu sur le triangle.
+
+\subsection{Polarité et Rotationnel de Surface}
+La polarité $p \in \{-1, 1\}$ caractérise l'orientation hors-plan de l'aimantation au cœur du défaut via le produit scalaire avec la normale sortante $\mathbf{n}$ :
+\begin{equation}
+p = \text{signe}\left( \frac{1}{3} \sum_{i=0}^{2} \mathbf{m}_i \cdot \mathbf{n} \right)
+\end{equation}
+La nature de la singularité (Vortex, Antivortex, ou Sink-Source de surface) est extraite de l'analyse spectrale de la matrice jacobienne réduite 2D $\mathbf{J}_{surf}$.
+
+\end{document}
