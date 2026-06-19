@@ -319,6 +319,25 @@ std::unique_ptr<BlochPointResult> analyze_bloch_point(int current_iter, double c
         Eigen::Vector4d coeff_y = inv_A_space * nodes_mag.row(1).transpose();
         Eigen::Vector4d coeff_z = inv_A_space * nodes_mag.row(2).transpose();
 
+	/*
+        La structure des coefficients (coeff_x, coeff_y, coeff_z)
+        Un peu plus haut dans le code, une interpolation linéaire (ou affine) des composantes de
+        l'aimantation (mx, my, mz) a été réalisée sur un tétraèdre. Pour chaque composante,
+        on obtient un vecteur de 4 coefficients. Par exemple, pour mx :
+        mx(x, y, z) = c0 + c1 * x + c2 * y + c3 * z
+
+        Dans la structure d'Eigen utilisée ici, le vecteur coeff_x contient ces quatre valeurs sous la forme [c0, c1, c2, c3] :
+        coeff_x[0] est la constante (c0).
+        coeff_x[1] est la dérivée par rapport à x (dm_x/dx = c1).
+        coeff_x[2] est la dérivée par rapport à y (dm_x/dy = c2).
+        coeff_x[3] est la dérivée par rapport à z (dm_x/dz = c3).
+
+        La méthode .tail<3>() d'Eigen permet d'extraire les 3 derniers éléments d'un vecteur.
+        En faisant coeff_x.tail<3>(), le code ignore la constante c0 (le premier élément) et
+        récupère uniquement le triplet de dérivées partielles [c1, c2, c3], c'est-à-dire le
+        gradient de la composante mx : (dm_x/dx, dm_x/dy, dm_x/dz).
+        */
+
         Eigen::Matrix3d jac;
         jac.row(0) = coeff_x.tail<3>();
         jac.row(1) = coeff_y.tail<3>();
