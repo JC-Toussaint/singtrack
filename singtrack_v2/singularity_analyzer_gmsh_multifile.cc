@@ -117,20 +117,71 @@ Eigen::MatrixXd load_magnetization(const std::string& sol_filename, double& out_
     return mag;
 }
 
-// --- FONCTION 2 : LECTURE DU MAILLAGE VIA GMSH API ---
+// --- FONCTION 2 : LECTURE DU MAILLAGE VIA GMSH API (AVEC SQUIZZAGE DES LIGNES HORS-FORMAT) ---
 Mesh load_mesh_gmsh(const std::string& msh_filename, size_t expected_nodes) {
     Mesh mesh;
 
+    // 1. Pré-traitement et nettoyage du fichier maillage
+    std::ifstream src_file(msh_filename);
+    if (!src_file.is_open()) {
+        throw std::runtime_error("Impossible d'ouvrir le fichier maillage : " + msh_filename);
+    }
+
+    std::string clean_filename = msh_filename + ".clean_tmp";
+    std::ofstream dst_file(clean_filename);
+    
+    std::string line;
+    bool inside_corrupted_zone = false;
+    int skipped_lines_count = 0;
+
+    while (std::getline(src_file, line)) {
+        // Détection du tag de fin du format de maillage
+        if (line.find("$EndMeshFormat") != std::string::npos) {
+            dst_file << line << "\n";
+            inside_corrupted_zone = true; // On commence à surveiller le saut de lignes
+            continue;
+        }
+
+        // Détection du tag réglementaire suivant ($Nodes)
+        if (line.find("$Nodes") != std::string::npos) {
+            inside_corrupted_zone = false; // Fin de la zone de lignes parasites
+        }
+
+        // Si on est entre les deux et que la ligne n'est pas le début de $Nodes, on la squizze
+        if (inside_corrupted_zone) {
+            skipped_lines_count++;
+            continue; // Ignore la ligne
+        }
+
+        // Écrit les lignes valides dans le fichier temporaire
+        dst_file << line << "\n";
+    }
+    src_file.close();
+    dst_file.close();
+
+    // Avertir l'utilisateur si des lignes ont été ignorées
+    if (skipped_lines_count > 0) {
+        std::cout << "\n[ATTENTION] Le fichier maillage " << msh_filename << " contenait " 
+                  << skipped_lines_count << " ligne(s) non standard entre $EndMeshFormat et $Nodes.\n"
+                  << "            Ces lignes ont ete squizees pour assurer une lecture correcte.\n\n";
+    }
+
+    // 2. Initialisation de Gmsh et ouverture du fichier nettoyé
     gmsh::initialize();
     gmsh::option::setNumber("General.Terminal", 0);
     
     try {
-        gmsh::open(msh_filename);
+        gmsh::open(clean_filename);
     } catch (...) {
+        std::filesystem::remove(clean_filename); // Nettoyage
         gmsh::finalize();
         throw std::runtime_error("Impossible d'ouvrir le fichier maillage via Gmsh : " + msh_filename);
     }
 
+    // Suppression du fichier temporaire une fois chargé en mémoire par Gmsh
+    std::filesystem::remove(clean_filename);
+
+    // 3. Extraction classique des nœuds et éléments
     std::vector<size_t> nodeTags;
     std::vector<double> coord;
     std::vector<double> parametricCoord;
