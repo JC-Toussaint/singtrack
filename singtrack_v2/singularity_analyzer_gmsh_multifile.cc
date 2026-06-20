@@ -253,15 +253,40 @@ std::vector<Eigen::Vector3i> orient_triangles_outward(const Eigen::MatrixXd& poi
         }
     }
     std::cout << "Correction de l'orientation des triangles..." << std::endl;
+    /*
+La boucle principale
+Recherche des tétraèdres connectés aux sommets
+Le code utilise une table de correspondance précalculée, appelee node_to_tetra. Pour chacun des trois sommets du triangle, cette table fournit la liste de tous les tétraèdres du maillage qui touchent ce sommet. On obtient ainsi trois listes de tétraèdres : t0_list, t1_list et t2_list.
+
+Intersection des listes (Recherche du tétraèdre adjacent)
+Le but est de trouver le tétraèdre unique qui possède simultanément les trois sommets du triangle. Pour cela, le code utilise la fonction standard std::set_intersection à deux reprises.
+D'abord, il cherche les tétraèdres communs au sommet 0 et au sommet 1, ce qui donne une liste intermédiaire intersect1.
+Ensuite, il cherche les tétraèdres communs entre cette liste intermédiaire et la liste du sommet 2. Le résultat final est stocké dans final_intersect.
+Si cette intersection est vide, cela signifie que le triangle n'appartient à aucun tétraèdre connu du maillage, le code passe alors directement au triangle suivant grâce à l'instruction continue.
+
+Identification du tétraèdre et du nœud interne
+Si un tétraèdre a été trouvé, le code récupère son identifiant, tetra_idx, en prenant le premier élément de l'intersection. Il extrait ensuite la définition complète de ce tétraèdre, appelee tetra, qui contient quatre nœuds.
+Enfin, une petite boucle interne examine les quatre nœuds de ce tétraèdre pour trouver celui qui n'est pas un sommet du triangle de surface. 
+Dès qu'un nœud du tétraèdre est différent de tri[0], tri[1] et tri[2], il est sauvegardé dans la variable internal_node et la boucle s'arrête.
+     */
+    //  création d'une copie de la liste des triangles d'origine, appelée oriented_triangles
     std::vector<Eigen::Vector3i> oriented_triangles = triangles;
-    int corrected_count = 0;
+    int corrected_count = 0; // compteur du nombre de triangles réorientés
+			     //
     for (size_t i = 0; i < oriented_triangles.size(); ++i) {
         auto& tri = oriented_triangles[i];
-        const auto& t0_list = node_to_tetra[tri[0]];
+        const auto& t0_list = node_to_tetra[tri[0]];  // récupération des 3 sommets
         const auto& t1_list = node_to_tetra[tri[1]];
         const auto& t2_list = node_to_tetra[tri[2]];
         std::set<int> intersect1, final_intersect;
+// extraction des tétraèdres présents en même temps dans les listes t0_list et t1_list. 
+// Ils contiennent l'arête reliant le sommet 0 et le sommet 1 du triangle. 
+// Le résultat de cette intersection est inséré et stocké dans l'ensemble intersect1.
         std::set_intersection(t0_list.begin(), t0_list.end(), t1_list.begin(), t1_list.end(), std::inserter(intersect1, intersect1.begin()));
+
+// finalisation de la recherche en filtrant les résultats précédents pour ne garder que le ou les tétraèdres qui contiennent 
+// l'intégralité du triangle de surface (les sommets 0, 1 et 2). Si le maillage est bien construit, final_intersect ne contiendra 
+// au maximum qu'un seul élément, qui est le tétraèdre adjacent à la surface
         std::set_intersection(intersect1.begin(), intersect1.end(), t2_list.begin(), t2_list.end(), std::inserter(final_intersect, final_intersect.begin()));
         if (final_intersect.empty()) continue;
         int tetra_idx = *final_intersect.begin();
