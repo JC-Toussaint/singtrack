@@ -549,6 +549,7 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
                 surf_type = "saddle";
             } else {
                 // Sinon, c'est un nœud divergent (Source) ou convergent (Sink)
+		// les deux valeurs propres sont réelles ET de le même signe
                 surf_type = (eigvals[0].real() > 0) ? "source" : "sink";
             }
         }
