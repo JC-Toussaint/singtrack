@@ -1,4 +1,0 @@
-#iter   time                    x         y         z    curl_x    curl_y    curl_z     eig0_re     eig0_im     eig1_re     eig1_im     eig2_re     eig2_im  type
-0       7.322257e-04      -1.5908    0.4982    9.0314   -0.0117   -0.0190    0.4694      0.0613      0.2348      0.0613     -0.2348     -0.1668      0.0000  spiral saddle 1 in - 2out head to head
-1000    7.322257e-04      -1.5908    0.4982    9.0314   -0.0117   -0.0190    0.4694      0.0613      0.2348      0.0613     -0.2348     -0.1668      0.0000  spiral saddle 1 in - 2out head to head
-7400    7.322257e-04      -1.5908    0.4982    9.0314   -0.0117   -0.0190    0.4694      0.0613      0.2348      0.0613     -0.2348     -0.1668      0.0000  spiral saddle 1 in - 2out head to head
