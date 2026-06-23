@@ -28,7 +28,7 @@ using Matrix34d = Eigen::Matrix<double, 3, 4>;
 // --- CONFIGURATION & PARAMÈTRES ---
 const std::string DIRECTORY_PATH = "."; // Dossier où se trouvent les fichiers *.sol ('.' signifie dossier courant)
 // TOL : Seuil numérique de tolérance pour éviter les divisions par zéro lors du calcul de déterminants, 
-// ou pour identifier des valeurs considéres comme purement réelles/imaginaire (proches de la précision machine).
+// ou pour identifier des valeurs considérées comme purement réelles/imaginaires (proches de la précision machine).
 const double TOL = 1e-16;
 
 // Structure représentant le maillage géométrique 3D non structuré
@@ -50,12 +50,13 @@ struct BlochPointResult {
 
 // Structures de résultats complètes pour l'analyse des défauts de surface (2D)
 struct SurfaceSingularityResult {
-    int iter;                 // Numéro de l'itération temporelle
-    double time;              // Temps physique de la simulation
-    Eigen::Vector3d pos;      // Position spatiale (x, y, z) de la singularité sur le triangle de surface
-    double curl_n;            // Composante normale du rotationnel à la surface (curl m \cdot \vec{n})
-    Eigen::Vector2cd eigvals; // Les 2 valeurs propres complexes issues du jacobien projeté sur le plan tangent de la surface
-    std::string type;         // Classification textuelle bidimensionnelle (ex: vortex, meron, saddle...)
+    int iter;                  // Numéro de l'itération temporelle
+    double time;               // Temps physique de la simulation
+    Eigen::Vector3d pos;       // Position spatiale (x, y, z) de la singularité sur le triangle de surface
+    double curl_n;             // Composante normale du rotationnel à la surface (curl m \cdot \vec{n})
+    Eigen::Vector2cd eigvals;  // Les 2 valeurs propres complexes issues du jacobien projeté sur le plan tangent de la surface
+    std::string type;          // Classification textuelle bidimensionnelle (ex: vortex, meron, saddle...)
+    double polarity;           // Polarité physique brute (composante normale de l'aimantation m_n au centre du défaut)
     double topological_charge; // Charge topologique discrète locale Q_local (Berg-Lüscher) calculée sur la facette triangulaire
 };
 
@@ -76,7 +77,7 @@ Eigen::MatrixXd load_magnetization(const std::string& sol_filename, double& out_
     if (pos_colon != std::string::npos) {
         std::string time_str = line.substr(pos_colon + 1);
         try {
-            out_time = std::stod(time_str); // Conversion de la chaîne de caractères (notation scientifique souvent) en double precision
+            out_time = std::stod(time_str); // Conversion de la chaîne de caractères (notation scientifique souvent) en double précision
         } catch (...) {
             out_time = 0.0;
             std::cerr << "Attention : Impossible de parser la valeur de temps dans " << sol_filename << ". Fixé à 0.0.\n";
@@ -453,7 +454,7 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
     Eigen::Vector3d v2 = ns_coords.col(2) - ns_coords.col(0);
     Eigen::Vector3d n = v1.cross(v2); // Produit vectoriel pour obtenir la normale géométrique
     double n_norm = n.norm();
-    if (n_norm == 0) return nullptr; // Securité : évite les triangles plats d'aire nulle
+    if (n_norm == 0) return nullptr; // Sécurité : évite les triangles plats d'aire nulle
     n.normalize(); // Normalisation de \vec{n} pour obtenir un vecteur unitaire
 
     // --- ENTRÉE DE L'INVARIANT TOPOLOGIQUE RIGOUREUX (Formule de Berg-Lüscher pour triangle discret) ---
@@ -503,6 +504,13 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
         // Reconstruction tridimensionnelle de la position exacte de la singularité de surface
         Eigen::Vector3d sol_cartesian = ns_coords.col(0) + vec_local[0] * v1 + vec_local[1] * v2;
         
+        // --- EXTRACTION DE LA POLARITÉ AU CENTRE (Composante normale brute de m) ---
+        // Interpolation de l'aimantation 3D cartésienne complète au point exact du défaut
+        Eigen::Vector3d mag_at_defect = ns_mag.col(0) + vec_local[0] * (ns_mag.col(1) - ns_mag.col(0)) + vec_local[1] * (ns_mag.col(2) - ns_mag.col(0));
+        // La polarité p_val est la projection du champ total sur la normale externe unitaire
+        double p_val = mag_at_defect.dot(n);
+        // ----------------------------------------------------------------------------
+
         // Montage du système d'interpolation linéaire 2D pour évaluer le Jacobien plan (matrice M_matrix)
         Eigen::Matrix3d M_matrix;
         M_matrix.col(0) = Eigen::Vector3d::Ones();
@@ -555,9 +563,9 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
             }
         }
 
-        // Retourne le conteneur incluant désormais la charge topologique de Berg-Lüscher à la place de l'ancienne polarité
+        // Retourne le conteneur incluant à la fois la polarité brute p_val ET la charge topologique globale Q_local
         return std::make_unique<SurfaceSingularityResult>(SurfaceSingularityResult{
-            current_iter, current_time, sol_cartesian, curl_n, eigvals, surf_type, Q_local
+            current_iter, current_time, sol_cartesian, curl_n, eigvals, surf_type, p_val, Q_local
         });
     }
     return nullptr; // Pas de singularité détectée sur cette facette de surface
@@ -586,7 +594,7 @@ int main(int argc, char* argv[]) {
     for (const auto& entry : fs::directory_iterator(DIRECTORY_PATH)) {
         std::string filename = entry.path().filename().string();
         
-        // Filtrage strict sur l'extension .sol
+        // Filtrage srict sur l'extension .sol
         if (entry.path().extension() == ".sol") {
             try {
                 // Regex configurée pour intercepter le motif de nommage, ex: "magn_iter450.sol"
@@ -674,7 +682,7 @@ int main(int argc, char* argv[]) {
             }
 
             // Test de pré-filtrage topologique ultra-rapide (sign_check) utilisant les expressions Lambdas de C++.
-            // Un point de Bloch (\vec{m}=\vec{0}) ne peut exister dans un tétraèdre QUE si chaque composante (mx, my, mz) 
+            // Un point de Bloch (\vec{m}=\vec{0}) ne peut existé dans un tétraèdre QUE si chaque composante (mx, my, mz) 
             // change de signe au moins une fois parmi les 4 nœuds de l'élément. 
             auto sign_check = [](const Matrix34d& m, int axis) {
                 bool has_pos = false, has_neg = false;
@@ -705,8 +713,8 @@ int main(int argc, char* argv[]) {
 
             auto res_surf = analyze_surface_singularity(iter, current_time, s_coords, s_mag);
             if (res_surf) {
-                std::printf(" -> [Singularité Surface] (%s) à : [%.5f, %.5f, %.5f] nm | Q_topologique: %.4f\n",
-                            res_surf->type.c_str(), res_surf->pos.x(), res_surf->pos.y(), res_surf->pos.z(), res_surf->topological_charge);
+                std::printf(" -> [Singularité Surface] (%s) à : [%.5f, %.5f, %.5f] nm | Pol: %+.2f | Q_topo: %+.4f\n",
+                            res_surf->type.c_str(), res_surf->pos.x(), res_surf->pos.y(), res_surf->pos.z(), res_surf->polarity, res_surf->topological_charge);
                 global_surface_singularities.push_back(*res_surf);
             }
         }
@@ -717,7 +725,7 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=> Temps total de traitement de tous les fichiers .sol : "
               << sol_duration.count() << " secondes.\n";
 
-    // 5. SAUVEGARDE GLOBALE COMPLETE (Génération des fichiers de rapports tabulés structurés)
+    // 5. SAUVEGARDE GLOBALE COMPLÈTE (Génération des fichiers de rapports tabulés structurés)
     std::cout << "\n---------------------------------------------\nExécution de l'export final...\n";
     
     // Exportation du fichier texte compilant tous les points de Bloch (Volume) trouvés au cours du temps
@@ -752,7 +760,8 @@ int main(int argc, char* argv[]) {
                << std::setw(15) << "time"
                << std::right << std::setw(10) << "x" << std::setw(10) << "y" << std::setw(10) << "z"
                << std::setw(12) << "curl_n" 
-               << std::setw(12) << "Q_topology" // Colonne mise à jour portant l'invariant de Berg-Lüscher
+               << std::setw(10) << "polarity"   // Colonne restaurée portant la valeur de la polarité locale brute
+               << std::setw(12) << "Q_topology" // Colonne de l'invariant de Berg-Lüscher
                << std::setw(12) << "eig0_re" << std::setw(12) << "eig0_im"
                << std::setw(12) << "eig1_re" << std::setw(12) << "eig1_im"
                << "  type\n";
@@ -763,6 +772,7 @@ int main(int argc, char* argv[]) {
                    << std::right << std::fixed << std::setprecision(4)
                    << std::setw(10) << ss.pos.x() << std::setw(10) << ss.pos.y() << std::setw(10) << ss.pos.z()
                    << std::setw(12) << ss.curl_n
+                   << std::setw(10) << std::setprecision(2) << ss.polarity
                    << std::setw(12) << std::setprecision(4) << ss.topological_charge
                    << std::fixed << std::setprecision(4)
                    << std::setw(12) << ss.eigvals[0].real() << std::setw(12) << ss.eigvals[0].imag()
