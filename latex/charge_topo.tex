@@ -1,0 +1,321 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[french]{babel}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{bm}
+\usepackage{geometry}
+\usepackage{hyperref}
+
+\geometry{margin=2.5cm}
+
+\title{Calcul de la charge topologique sur un maillage triangulaire\\
+selon la formulation de Berg et Lüscher}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+En micromagnétisme, la charge topologique d'un champ d'aimantation unitaire
+$\mathbf{m}:\Omega\rightarrow S^2$ est définie dans le cas continu par
+
+\begin{equation}
+Q=\frac{1}{4\pi}
+\int_{\Omega}
+\mathbf{m}\cdot
+\left(
+\frac{\partial\mathbf{m}}{\partial x}
+\times
+\frac{\partial\mathbf{m}}{\partial y}
+\right)
+\,dx\,dy.
+\end{equation}
+
+La quantité
+
+\[
+\rho=
+\frac{1}{4\pi}
+\mathbf{m}\cdot
+(\partial_x\mathbf{m}\times\partial_y\mathbf{m})
+\]
+
+est appelée densité topologique.
+
+Lorsque le domaine est discrétisé par un maillage d'éléments finis, le champ
+n'est connu qu'aux sommets des triangles. Les dérivées spatiales deviennent
+alors dépendantes de l'interpolation choisie et la formule précédente ne
+préserve plus exactement le caractère topologique de la charge.
+
+La méthode proposée par Berg et Lüscher consiste à remplacer l'intégrale locale
+par l'aire orientée du triangle sphérique défini par les trois vecteurs
+d'aimantation situés aux sommets de chaque élément.
+
+\section{Triangle sphérique}
+
+Considérons un triangle du maillage dont les sommets portent les vecteurs
+unitaires
+
+\[
+\mathbf{a},\qquad
+\mathbf{b},\qquad
+\mathbf{c}.
+\]
+
+Ces trois vecteurs définissent trois points sur la sphère unité et délimitent
+un triangle sphérique.
+
+La contribution topologique de cet élément est définie par
+
+\[
+Q_T=\frac{\Omega}{4\pi},
+\]
+
+où $\Omega$ désigne l'aire orientée du triangle sphérique.
+
+\section{Aire sphérique}
+
+L'aire d'un triangle sphérique est donnée par son excès sphérique
+
+\[
+\Omega=A+B+C-\pi,
+\]
+
+où $A$, $B$ et $C$ sont les angles du triangle sphérique.
+
+Cette expression est peu adaptée aux calculs numériques puisque les angles
+deviennent difficiles à évaluer lorsque le triangle est petit.
+
+Berg et Lüscher utilisent une formulation entièrement équivalente fondée sur
+l'angle solide associé aux trois vecteurs.
+
+\section{Formule de Berg et Lüscher}
+
+On définit
+
+\begin{equation}
+N=
+\mathbf{a}\cdot
+(\mathbf{b}\times\mathbf{c}),
+\end{equation}
+
+et
+
+\begin{equation}
+D=
+1+
+\mathbf{a}\cdot\mathbf{b}
++\mathbf{b}\cdot\mathbf{c}
++\mathbf{c}\cdot\mathbf{a}.
+\end{equation}
+
+On montre alors que
+
+\begin{equation}
+\tan\left(\frac{\Omega}{2}\right)
+=
+\frac{N}{D}.
+\end{equation}
+
+Afin de choisir automatiquement le bon quadrant, on écrit
+
+\begin{equation}
+\boxed{
+\Omega
+=
+2\operatorname{atan2}(N,D)
+}
+\end{equation}
+
+avec
+
+\[
+N=
+\mathbf{a}\cdot(\mathbf{b}\times\mathbf{c}),
+\]
+
+et
+
+\[
+D=
+1+\mathbf{a}\cdot\mathbf{b}
++\mathbf{b}\cdot\mathbf{c}
++\mathbf{c}\cdot\mathbf{a}.
+\]
+
+Cette formule fournit directement l'aire orientée du triangle sphérique.
+
+\section{Charge topologique discrète}
+
+Chaque triangle contribue donc à la charge totale selon
+
+\begin{equation}
+\boxed{
+Q_T=
+\frac{1}{2\pi}
+\operatorname{atan2}
+\left(
+\mathbf{a}\cdot(\mathbf{b}\times\mathbf{c}),
+1+\mathbf{a}\cdot\mathbf{b}
++\mathbf{b}\cdot\mathbf{c}
++\mathbf{c}\cdot\mathbf{a}
+\right)
+}
+\end{equation}
+
+La charge totale est simplement obtenue par sommation
+
+\begin{equation}
+Q=
+\sum_T Q_T.
+\end{equation}
+
+\section{Lien avec la définition continue}
+
+Supposons que le triangle soit suffisamment petit.
+
+On écrit
+
+\[
+\mathbf{b}
+=
+\mathbf{a}+\delta_x,
+\qquad
+\mathbf{c}
+=
+\mathbf{a}+\delta_y,
+\]
+
+avec
+
+\[
+\|\delta_x\|,
+\|\delta_y\|
+\ll1.
+\]
+
+Comme les vecteurs sont unitaires,
+
+\[
+\mathbf{a}\cdot\delta_x
+=
+\mathbf{a}\cdot\delta_y
+=
+0.
+\]
+
+Le numérateur devient
+
+\[
+N
+=
+\mathbf{a}\cdot
+(\delta_x\times\delta_y)
++O(h^3),
+\]
+
+tandis que
+
+\[
+D
+=
+4+O(h^2).
+\]
+
+Il vient alors
+
+\[
+\Omega
+=
+2\arctan\left(\frac{N}{4}\right)
+=
+\frac12
+\mathbf{a}\cdot
+(\delta_x\times\delta_y)
++O(h^3).
+\]
+
+En identifiant
+
+\[
+\delta_x
+=
+\frac{\partial\mathbf{m}}{\partial x}\Delta x,
+\qquad
+\delta_y
+=
+\frac{\partial\mathbf{m}}{\partial y}\Delta y,
+\]
+
+et en remarquant que l'aire du triangle plan vaut
+
+\[
+A_T
+=
+\frac12
+\Delta x\,\Delta y,
+\]
+
+on obtient
+
+\[
+\Omega
+=
+A_T\,
+\mathbf{m}\cdot
+\left(
+\frac{\partial\mathbf{m}}{\partial x}
+\times
+\frac{\partial\mathbf{m}}{\partial y}
+\right)
++O(h^3).
+\]
+
+La contribution discrète devient alors
+
+\[
+Q_T
+=
+\frac{1}{4\pi}
+\int_T
+\mathbf{m}\cdot
+\left(
+\partial_x\mathbf{m}
+\times
+\partial_y\mathbf{m}
+\right)
+\,dS
++O(h^3),
+\]
+
+ce qui montre que la formulation de Berg et Lüscher est consistante avec la
+définition continue.
+
+\section{Propriétés}
+
+La méthode possède plusieurs propriétés importantes :
+
+\begin{itemize}
+\item elle ne dépend pas de la forme géométrique des triangles ;
+\item elle ne nécessite aucune approximation des dérivées de
+l'aimantation ;
+\item elle est robuste même lorsque l'aimantation varie fortement ;
+\item elle converge vers la définition continue lorsque le maillage est
+raffiné ;
+\item elle préserve beaucoup mieux le caractère entier de la charge
+topologique que les méthodes basées sur les dérivées numériques.
+\end{itemize}
+
+\section*{Référence}
+
+B. Berg and M. Lüscher,
+\emph{Definition and Statistical Distributions of a Topological Number in the
+Lattice O(3) Sigma Model},
+Nuclear Physics B, vol. 190, pp. 412--424, 1981.
+
+\end{document}
