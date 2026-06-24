@@ -416,7 +416,7 @@ std::unique_ptr<BlochPointResult> analyze_bloch_point(int current_iter, double c
             else {
                 // Le produit des 3 valeurs propres donne le signe global du déterminant du Jacobien.
                 // Permet de distinguer la configuration des lignes entrantes et sortantes.
-                bp_type = (r0 * r1 * r2 > 0) ? "saddle 2 in - 1 out" : "saddle 1 in - 2 out";
+                bp_type = (r0 * r1 * r2 > 0) ? "saddle_2in-1out" : "saddle_1in-2out";
             }
         } else {
             // Présence de valeurs propres complexes conjuguées (a \pm ib) et d'une valeur propre réelle (lamb1).
@@ -431,10 +431,10 @@ std::unique_ptr<BlochPointResult> analyze_bloch_point(int current_iter, double c
                 lamb1 = eigvals[2].real(); a = eigvals[0].real();
             }
             // Classification fine selon les signes combinés de la partie réelle complexe (a) et de la valeur réelle (lamb1)
-            if (lamb1 > 0 && a > 0) bp_type = "spiral source";
-            else if (lamb1 > 0 && a < 0) bp_type = "spiral saddle 2 in - 1out tail to tail";
-            else if (lamb1 < 0 && a > 0) bp_type = "spiral saddle 1 in - 2out head to head";
-            else if (lamb1 < 0 && a < 0) bp_type = "spiral sink";
+            if (lamb1 > 0 && a > 0) bp_type = "spiral_source";
+            else if (lamb1 > 0 && a < 0) bp_type = "spiral_saddle_2in-1out_tail_to_tail";
+            else if (lamb1 < 0 && a > 0) bp_type = "spiral_saddle_1in-2out_head_to_head";
+            else if (lamb1 < 0 && a < 0) bp_type = "spiral_sink";
         }
 
         // Renvoie l'objet conteneur de résultats sous forme de pointeur intelligent unique (std::unique_ptr)
@@ -544,18 +544,18 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
             // Utilisation exclusive et non arbitraire de la charge topologique discrète Q_local :
             // Si la facette triangulaire présente une distorsion topologique notable (|Q_local| > 0.1), c'est la signature d'un Méron.
             if (std::abs(Q_local) > 0.1) {
-                surf_type = (eigvals[0].real() > 0) ? "meron (spiral source)" : "meron (spiral sink)";
+                surf_type = (eigvals[0].real() > 0) ? "meron_(spiral_source)" : "meron_(spiral_sink)";
             } else {
-                surf_type = (eigvals[0].real() > 0) ? "vortex (spiral source)" : "vortex (spiral sink)";
+                surf_type = (eigvals[0].real() > 0) ? "vortex_(spiral_source)" : "vortex_(spiral_sink)";
             }
         } else {
             // Valeurs propres réelles : si elles sont de signes opposés, c'est une configuration de type point-selle (Saddle)
             if ((eigvals[0].real() > 0 && eigvals[1].real() < 0) || (eigvals[0].real() < 0 && eigvals[1].real() > 0)) {
                 // Distinction rigoureuse entre un anti-vortex plan standard et un anti-méron par l'invariant
                 if (std::abs(Q_local) > 0.1) {
-                    surf_type = "anti-meron (saddle)";
+                    surf_type = "anti-meron_(saddle)";
                 } else {
-                    surf_type = "anti-vortex (saddle)";
+                    surf_type = "anti-vortex_(saddle)";
                 }
             } else {
                 // Sinon, c'est un nœud divergent (Source) ou convergent (Sink)

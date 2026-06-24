@@ -420,7 +420,7 @@ std::unique_ptr<BlochPointResult> analyze_bloch_point(int current_iter, double c
             else {
                 // Le produit des 3 valeurs propres donne le signe global du déterminant du Jacobien.
                 // Permet de distinguer la configuration des lignes entrantes et sortantes.
-                bp_type = (r0 * r1 * r2 > 0) ? "saddle 2 in - 1 out" : "saddle 1 in - 2 out";
+                bp_type = (r0 * r1 * r2 > 0) ? "saddle_2in-1out" : "saddle_1in-2out";
             }
         } else {
             // Présence de valeurs propres complexes conjuguées (a \pm ib) et d'une valeur propre réelle (lamb1).
@@ -435,10 +435,10 @@ std::unique_ptr<BlochPointResult> analyze_bloch_point(int current_iter, double c
                 lamb1 = eigvals[2].real(); a = eigvals[0].real();
             }
             // Classification fine selon les signes combinés de la partie réelle complexe (a) et de la valeur réelle (lamb1)
-            if (lamb1 > 0 && a > 0) bp_type = "spiral source";
-            else if (lamb1 > 0 && a < 0) bp_type = "spiral saddle 2 in - 1out tail to tail";
-            else if (lamb1 < 0 && a > 0) bp_type = "spiral saddle 1 in - 2out head to head";
-            else if (lamb1 < 0 && a < 0) bp_type = "spiral sink";
+            if (lamb1 > 0 && a > 0) bp_type = "spiral_source";
+            else if (lamb1 > 0 && a < 0) bp_type = "spiral_saddle_2in-1out_tail_to_tail";
+            else if (lamb1 < 0 && a > 0) bp_type = "spiral_saddle_1in-2out_head_to_head";
+            else if (lamb1 < 0 && a < 0) bp_type = "spiral_sink";
         }
 
         // Renvoie l'objet conteneur de résultats sous forme de pointeur intelligent unique (std::unique_ptr)
@@ -528,7 +528,7 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
         bool is_complex = (std::abs(eigvals[0].imag()) > TOL || std::abs(eigvals[1].imag()) > TOL);
 
         if (is_complex) {
-            surf_type = (eigvals[0].real() > 0) ? "spiral source" : "spiral sink";
+            surf_type = (eigvals[0].real() > 0) ? "spiral_source" : "spiral_sink";
         } else {
             // Valeurs propres réelles : si elles sont de signes opposés, c'est un col (Saddle / Anti-vortex de surface)
             if ((eigvals[0].real() > 0 && eigvals[1].real() < 0) || (eigvals[0].real() < 0 && eigvals[1].real() > 0)) {
