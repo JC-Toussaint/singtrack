@@ -1,0 +1,659 @@
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <map>
+#include <set>
+#include <algorithm>
+#include <memory>
+#include <filesystem>
+#include <stdexcept>
+#include <iomanip>
+#include <Eigen/Dense>
+#include <Eigen/Eigenvalues>
+#include <regex>
+#include <chrono>
+
+// Inclusion de l'API Gmsh
+#include <gmsh.h>
+
+namespace fs = std::filesystem;
+using Matrix34d = Eigen::Matrix<double, 3, 4>;
+
+// --- CONFIGURATION & PARAMÈTRES ---
+const std::string DIRECTORY_PATH = "."; 
+const double TOL = 1e-16;
+
+// Structure représentant le maillage géométrique 3D non structuré
+struct Mesh {
+    Eigen::MatrixXd points;                  
+    std::vector<Eigen::Vector4i> tetrahedrons; 
+    std::vector<Eigen::Vector3i> triangles;    
+    Eigen::MatrixXd node_normals;              // CONTRIBUTION : Normale lissée à chaque sommet
+};
+
+// Structures de résultats
+struct BlochPointResult {
+    int iter;                 
+    double time;              
+    Eigen::Vector3d pos;      
+    Eigen::Vector3d curl;     
+    Eigen::Vector3cd eigvals; 
+    std::string type;         
+};
+
+struct SurfaceSingularityResult {
+    int iter;                  
+    double time;               
+    Eigen::Vector3d pos;       
+    double curl_n;             
+    Eigen::Vector2cd eigvals;  
+    std::string type;          
+    double polarity;           
+    double topological_charge; 
+};
+
+// --- FONCTION 1 : LECTURE D'UN FICHIER SOLUTION ---
+Eigen::MatrixXd load_magnetization(const std::string& sol_filename, double& out_time) {
+    std::ifstream sol_file(sol_filename);
+    if (!sol_file.is_open()) throw std::runtime_error("Fichier SOL manquant : " + sol_filename);
+    
+    std::string line;
+    if (!std::getline(sol_file, line)) {
+        throw std::runtime_error("Fichier SOL vide ou invalide : " + sol_filename);
+    }
+
+    size_t pos_colon = line.find(':');
+    if (pos_colon != std::string::npos) {
+        std::string time_str = line.substr(pos_colon + 1);
+        try {
+            out_time = std::stod(time_str); 
+        } catch (...) {
+            out_time = 0.0;
+        }
+    } else {
+        out_time = 0.0;
+    }
+
+    std::vector<Eigen::Vector3d> mag_list;
+    while (std::getline(sol_file, line)) {
+        if (line.empty() || line[0] == '#') continue; 
+        
+        std::stringstream ss(line);
+        std::string val;
+        std::vector<double> columns;
+        
+        while (ss >> val) {
+            try {
+                columns.push_back(std::stod(val));
+            } catch (...) {
+                throw std::runtime_error("Erreur de format numérique dans le fichier : " + sol_filename);
+            }
+        }
+        
+        if (columns.size() < 7) {
+            throw std::runtime_error("Ligne incomplète dans " + sol_filename);
+        }
+        
+        mag_list.push_back(Eigen::Vector3d(columns[4], columns[5], columns[6]));
+    }
+    sol_file.close();
+
+    Eigen::MatrixXd mag(mag_list.size(), 3);
+    for (size_t i = 0; i < mag_list.size(); ++i) {
+        mag.row(i) = mag_list[i];
+    }
+    return mag;
+}
+
+// --- FONCTION 2 : LECTURE DU MAILLAGE VIA GMSH API CORRIGÉE ---
+Mesh load_mesh_gmsh(const std::string& msh_filename, size_t expected_nodes) {
+    Mesh mesh;
+
+    std::ifstream src_file(msh_filename);
+    if (!src_file.is_open()) {
+        throw std::runtime_error("Impossible d'ouvrir le fichier maillage : " + msh_filename);
+    }
+
+    std::string clean_filename = msh_filename + ".clean_tmp";
+    std::ofstream dst_file(clean_filename);
+    
+    std::string line;
+    bool inside_corrupted_zone = false;
+    int skipped_lines_count = 0;
+
+    while (std::getline(src_file, line)) {
+        if (line.find("$EndMeshFormat") != std::string::npos) {
+            dst_file << line << "\n";
+            inside_corrupted_zone = true; 
+            continue;
+        }
+        if (line.find("$Nodes") != std::string::npos) {
+            inside_corrupted_zone = false; 
+        }
+        if (inside_corrupted_zone) {
+            skipped_lines_count++;
+            continue; 
+        }
+        dst_file << line << "\n";
+    }
+    src_file.close();
+    dst_file.close();
+
+    if (skipped_lines_count > 0) {
+        std::cout << "\n[ATTENTION] Le fichier maillage " << msh_filename << " contenait " 
+                  << skipped_lines_count << " ligne(s) non standard nettoyée(s).\n";
+    }
+
+    gmsh::initialize();
+    gmsh::option::setNumber("General.Terminal", 0); 
+    
+    try {
+        gmsh::open(clean_filename);
+    } catch (...) {
+        std::filesystem::remove(clean_filename); 
+        gmsh::finalize();
+        throw std::runtime_error("Impossible d'ouvrir le fichier maillage via Gmsh : " + msh_filename);
+    }
+    std::filesystem::remove(clean_filename);
+
+    std::vector<size_t> nodeTags;
+    std::vector<double> coord;
+    std::vector<double> parametricCoord;
+    gmsh::model::mesh::getNodes(nodeTags, coord, parametricCoord);
+
+    if (nodeTags.empty()) {
+        gmsh::finalize();
+        throw std::runtime_error("Le maillage chargé ne contient aucun nœud.");
+    }
+
+    // CORRECTION SÉCURITÉ : Trouver le tag maximum pour éviter les dépassements de capacité
+    size_t max_node_idx = expected_nodes;
+    for (size_t tag : nodeTags) {
+        if (tag > max_node_idx) {
+            max_node_idx = tag;
+        }
+    }
+    
+    // On redimensionne par rapport au maximum réel trouvé dans le .msh et le .sol
+    mesh.points.resize(max_node_idx, 3);
+    mesh.points.setZero(); // Initialisation par sécurité
+
+    for (size_t i = 0; i < nodeTags.size(); ++i) {
+        size_t idx = nodeTags[i] - 1; 
+        if (idx < max_node_idx) {
+            mesh.points(idx, 0) = coord[3 * i];     
+            mesh.points(idx, 1) = coord[3 * i + 1]; 
+            mesh.points(idx, 2) = coord[3 * i + 2]; 
+        }
+    }
+
+    std::vector<int> elementTypes;
+    std::vector<std::vector<size_t>> elementTags; 
+    std::vector<std::vector<size_t>> nodeTagsPerElement;
+    
+    gmsh::model::mesh::getElements(elementTypes, elementTags, nodeTagsPerElement);
+
+    for (size_t i = 0; i < elementTypes.size(); ++i) {
+        int type = elementTypes[i];
+        const auto& nodes = nodeTagsPerElement[i];
+
+        if (type == 2) { 
+            for (size_t j = 0; j < nodes.size(); j += 3) {
+                int idx0 = static_cast<int>(nodes[j] - 1);
+                int idx1 = static_cast<int>(nodes[j+1] - 1);
+                int idx2 = static_cast<int>(nodes[j+2] - 1);
+                // Sécurité indexation
+                if (idx0 < mesh.points.rows() && idx1 < mesh.points.rows() && idx2 < mesh.points.rows()) {
+                    mesh.triangles.push_back(Eigen::Vector3i(idx0, idx1, idx2));
+                }
+            }
+        } 
+        else if (type == 4) { 
+            for (size_t j = 0; j < nodes.size(); j += 4) {
+                int idx0 = static_cast<int>(nodes[j] - 1);
+                int idx1 = static_cast<int>(nodes[j+1] - 1);
+                int idx2 = static_cast<int>(nodes[j+2] - 1);
+                int idx3 = static_cast<int>(nodes[j+3] - 1);
+                // Sécurité indexation
+                if (idx0 < mesh.points.rows() && idx1 < mesh.points.rows() && idx2 < mesh.points.rows() && idx3 < mesh.points.rows()) {
+                    mesh.tetrahedrons.push_back(Eigen::Vector4i(idx0, idx1, idx2, idx3));
+                }
+            }
+        }
+    }
+
+    gmsh::finalize(); 
+    if (mesh.tetrahedrons.empty()) throw std::runtime_error("Aucun élément tétraédrique trouvé.");
+    return mesh;
+}
+
+// --- RÉORIENTATION DES TRIANGLES ---
+std::vector<Eigen::Vector3i> orient_triangles_outward(const Eigen::MatrixXd& points, 
+                                                      const std::vector<Eigen::Vector4i>& tetrahedrons, 
+                                                      const std::vector<Eigen::Vector3i>& triangles) {
+    if (triangles.empty()) return triangles;
+    std::cout << "Structure de recherche des tétraèdres en cours... " << std::endl;
+    
+    std::map<int, std::vector<int>> node_to_tetra;
+    for (int t_idx = 0; t_idx < static_cast<int>(tetrahedrons.size()); ++t_idx) {
+        for (int i = 0; i < 4; ++i) {
+            node_to_tetra[tetrahedrons[t_idx][i]].push_back(t_idx);
+        }
+    }
+    std::cout << "Correction de l'orientation des triangles..." << std::endl;
+    
+    std::vector<Eigen::Vector3i> oriented_triangles = triangles;
+    int corrected_count = 0; 
+                             
+    for (size_t i = 0; i < oriented_triangles.size(); ++i) {
+        auto& tri = oriented_triangles[i];
+        const auto& t0_list = node_to_tetra[tri[0]];  
+        const auto& t1_list = node_to_tetra[tri[1]];  
+        const auto& t2_list = node_to_tetra[tri[2]];  
+        std::set<int> intersect1, final_intersect;
+        
+        std::set_intersection(t0_list.begin(), t0_list.end(), t1_list.begin(), t1_list.end(), std::inserter(intersect1, intersect1.begin()));
+        std::set_intersection(intersect1.begin(), intersect1.end(), t2_list.begin(), t2_list.end(), std::inserter(final_intersect, final_intersect.begin()));
+        if (final_intersect.empty()) continue; 
+        
+        int tetra_idx = *final_intersect.begin(); 
+        Eigen::Vector4i tetra = tetrahedrons[tetra_idx];
+        int internal_node = -1;
+        
+        for (int n = 0; n < 4; ++n) {
+            if (tetra[n] != tri[0] && tetra[n] != tri[1] && tetra[n] != tri[2]) {
+                internal_node = tetra[n];
+                break;
+            }
+        }
+        
+        Eigen::Vector3d p0 = points.row(tri[0]);
+        Eigen::Vector3d p1 = points.row(tri[1]);
+        Eigen::Vector3d p2 = points.row(tri[2]);
+        Eigen::Vector3d p_in = points.row(internal_node); 
+        
+        Eigen::Vector3d v1 = p1 - p0;
+        Eigen::Vector3d v2 = p2 - p0;
+        Eigen::Vector3d normal = v1.cross(v2);
+        Eigen::Vector3d v_to_internal = p_in - p0;
+        
+        if (normal.dot(v_to_internal) > 0) {
+            std::swap(tri[0], tri[1]);
+            corrected_count++;
+        }
+    }
+    std::cout << "Orientation terminée. " << corrected_count << " / " << triangles.size() << " triangles inversés.\n";
+    return oriented_triangles;
+}
+
+// --- CONTRIBUTION : CALCUL DES NORMALES AUX SOMMETS ---
+Eigen::MatrixXd compute_node_normals(const Eigen::MatrixXd& points, const std::vector<Eigen::Vector3i>& triangles) {
+    std::cout << "Calcul et lissage des normales aux sommets de surface..." << std::endl;
+    Eigen::MatrixXd node_normals = Eigen::MatrixXd::Zero(points.rows(), 3);
+
+    for (const auto& tri : triangles) {
+        Eigen::Vector3d p0 = points.row(tri[0]);
+        Eigen::Vector3d p1 = points.row(tri[1]);
+        Eigen::Vector3d p2 = points.row(tri[2]);
+
+        Eigen::Vector3d v1 = p1 - p0;
+        Eigen::Vector3d v2 = p2 - p0;
+        Eigen::Vector3d face_normal = v1.cross(v2);
+
+        node_normals.row(tri[0]) += face_normal;
+        node_normals.row(tri[1]) += face_normal;
+        node_normals.row(tri[2]) += face_normal;
+    }
+
+    int active_surface_nodes = 0;
+    for (int i = 0; i < node_normals.rows(); ++i) {
+        double norm = node_normals.row(i).norm();
+        if (norm > TOL) {
+            node_normals.row(i) /= norm;
+            active_surface_nodes++;
+        }
+    }
+    std::cout << "=> " << active_surface_nodes << " normales nodales de surface calculées et normalisées.\n";
+    return node_normals;
+}
+
+// --- ANALYSE POINT DE BLOCH (VOLUME) ---
+std::unique_ptr<BlochPointResult> analyze_bloch_point(int current_iter, double current_time, const Matrix34d& nodes_coords, const Matrix34d& nodes_mag) {
+    Eigen::Matrix3d A_m;
+    A_m.col(0) = nodes_mag.col(1) - nodes_mag.col(0); 
+    A_m.col(1) = nodes_mag.col(2) - nodes_mag.col(0); 
+    A_m.col(2) = nodes_mag.col(3) - nodes_mag.col(0); 
+
+    if (std::abs(A_m.determinant()) < TOL) return nullptr;
+    Eigen::Vector3d vec_local = -1.0 * A_m.colPivHouseholderQr().solve(nodes_mag.col(0));
+
+    if ((vec_local.array() > 0).all() && (vec_local.array() < 1).all() && (vec_local.sum() < 1)) {
+        Eigen::Matrix3d B_geo;
+        B_geo.col(0) = nodes_coords.col(1) - nodes_coords.col(0); 
+        B_geo.col(1) = nodes_coords.col(2) - nodes_coords.col(0); 
+        B_geo.col(2) = nodes_coords.col(3) - nodes_coords.col(0); 
+
+        Eigen::Vector3d sol_cartesian = nodes_coords.col(0) + B_geo * vec_local;
+
+        Eigen::Matrix4d A_space;
+        A_space.col(0) = Eigen::Vector4d::Ones();
+        A_space.block<4,3>(0,1) = nodes_coords.transpose();
+
+        if (std::abs(A_space.determinant()) < TOL) return nullptr;
+
+        Eigen::Matrix4d inv_A_space = A_space.inverse();
+        Eigen::Vector4d coeff_x = inv_A_space * nodes_mag.row(0).transpose(); 
+        Eigen::Vector4d coeff_y = inv_A_space * nodes_mag.row(1).transpose(); 
+        Eigen::Vector4d coeff_z = inv_A_space * nodes_mag.row(2).transpose(); 
+
+        Eigen::Matrix3d jac;
+        jac.row(0) = coeff_x.tail<3>(); 
+        jac.row(1) = coeff_y.tail<3>(); 
+        jac.row(2) = coeff_z.tail<3>(); 
+
+        double curl_x = coeff_z[2] - coeff_y[3]; 
+        double curl_y = coeff_x[3] - coeff_z[1]; 
+        double curl_z = coeff_y[1] - coeff_x[2]; 
+                     
+        Eigen::EigenSolver<Eigen::Matrix3d> es(jac);
+        Eigen::Vector3cd eigvals = es.eigenvalues(); 
+
+        std::string bp_type = "unknown";
+        bool all_real = std::abs(eigvals[0].imag()) < TOL && std::abs(eigvals[1].imag()) < TOL && std::abs(eigvals[2].imag()) < TOL;
+
+        if (all_real) {
+            double r0 = eigvals[0].real(), r1 = eigvals[1].real(), r2 = eigvals[2].real();
+            if (r0 > 0 && r1 > 0 && r2 > 0) bp_type = "source";
+            else if (r0 < 0 && r1 < 0 && r2 < 0) bp_type = "sink";
+            else {
+                bp_type = (r0 * r1 * r2 > 0) ? "saddle_2in-1out" : "saddle_1in-2out";
+            }
+        } else {
+            double lamb1 = 0, a = 0;
+            if (std::abs(eigvals[0].imag()) < TOL) {
+                lamb1 = eigvals[0].real(); a = eigvals[1].real();
+            } else if (std::abs(eigvals[1].imag()) < TOL) {
+                lamb1 = eigvals[1].real(); a = eigvals[0].real();
+            } else {
+                lamb1 = eigvals[2].real(); a = eigvals[0].real();
+            }
+            if (lamb1 > 0 && a > 0) bp_type = "spiral_source";
+            else if (lamb1 > 0 && a < 0) bp_type = "spiral_saddle_2in-1out_tail_to_tail";
+            else if (lamb1 < 0 && a > 0) bp_type = "spiral_saddle_1in-2out_head_to_head";
+            else if (lamb1 < 0 && a < 0) bp_type = "spiral_sink";
+        }
+
+        return std::make_unique<BlochPointResult>(BlochPointResult{
+            current_iter, current_time, sol_cartesian, Eigen::Vector3d(curl_x, curl_y, curl_z), eigvals, bp_type
+        });
+    }
+    return nullptr; 
+}
+
+// --- ANALYSE SINGULARITÉ DE SURFACE ---
+std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int current_iter, double current_time, 
+                                                                     const Eigen::Matrix3d& ns_coords, 
+                                                                     const Eigen::Matrix3d& ns_mag,
+                                                                     const Eigen::Matrix3d& ns_normals) {
+    Eigen::Vector3d v1 = ns_coords.col(1) - ns_coords.col(0);
+    Eigen::Vector3d v2 = ns_coords.col(2) - ns_coords.col(0);
+    Eigen::Vector3d n_geom = v1.cross(v2); 
+    double n_norm = n_geom.norm();
+    if (n_norm == 0) return nullptr; 
+    n_geom.normalize(); 
+
+    Eigen::Vector3d m0 = ns_mag.col(0);
+    Eigen::Vector3d m1 = ns_mag.col(1);
+    Eigen::Vector3d m2 = ns_mag.col(2);
+
+    double triple_product = m0.dot(m1.cross(m2));
+    double denominator = 1.0 + m0.dot(m1) + m1.dot(m2) + m2.dot(m0);
+
+    double Q_local = 0.0;
+    if (std::abs(denominator) > TOL) {
+        Q_local = (2.0 * std::atan2(triple_product, denominator)) / (4.0 * M_PI);
+    }
+
+    Eigen::Vector3d t0 = v1.normalized();   
+    Eigen::Vector3d t1 = n_geom.cross(t0); 
+
+    Eigen::Vector3d m_t0 = ns_mag.transpose() * t0; 
+    Eigen::Vector3d m_t1 = ns_mag.transpose() * t1; 
+
+    Eigen::Vector3d c_t0 = ns_coords.transpose() * t0;
+    Eigen::Vector3d c_t1 = ns_coords.transpose() * t1;
+
+    Eigen::Matrix2d A_surf;
+    A_surf(0, 0) = m_t0[1] - m_t0[0];
+    A_surf(0, 1) = m_t1[1] - m_t1[0];
+    A_surf(1, 0) = m_t0[2] - m_t0[0];
+    A_surf(1, 1) = m_t1[2] - m_t1[0];
+
+    if (std::abs(A_surf.determinant()) < TOL) return nullptr; 
+
+    Eigen::Vector2d vec_local = -1.0 * A_surf.colPivHouseholderQr().solve(Eigen::Vector2d(m_t0[0], m_t1[0]));
+
+    if (vec_local[0] > 0 && vec_local[1] > 0 && (vec_local[0] + vec_local[1] < 1)) {
+        Eigen::Vector3d sol_cartesian = ns_coords.col(0) + vec_local[0] * v1 + vec_local[1] * v2;
+        
+        // --- CONTRIBUTION : INTERPOLATION DE LA NORMALE (Gouraud/Phong Shading) ---
+        Eigen::Vector3d n_interpolated = ns_normals.col(0) + vec_local[0] * (ns_normals.col(1) - ns_normals.col(0)) 
+                                                           + vec_local[1] * (ns_normals.col(2) - ns_normals.col(0));
+        n_interpolated.normalize(); 
+
+        Eigen::Vector3d mag_at_defect = ns_mag.col(0) + vec_local[0] * (ns_mag.col(1) - ns_mag.col(0)) + vec_local[1] * (ns_mag.col(2) - ns_mag.col(0));
+        double p_val = mag_at_defect.dot(n_interpolated);
+
+        Eigen::Matrix3d M_matrix;
+        M_matrix.col(0) = Eigen::Vector3d::Ones();
+        M_matrix.col(1) = c_t0;
+        M_matrix.col(2) = c_t1;
+
+        if (std::abs(M_matrix.determinant()) < TOL) return nullptr;
+        Eigen::Matrix3d inv_M = M_matrix.inverse();
+
+        Eigen::Vector3d coeff_t0 = inv_M * m_t0; 
+        Eigen::Vector3d coeff_t1 = inv_M * m_t1; 
+
+        Eigen::Matrix2d jac_2d;
+        jac_2d(0, 0) = coeff_t0[1]; jac_2d(0, 1) = coeff_t0[2]; 
+        jac_2d(1, 0) = coeff_t1[1]; jac_2d(1, 1) = coeff_t1[2]; 
+
+        Eigen::EigenSolver<Eigen::Matrix2d> es(jac_2d);
+        Eigen::Vector2cd eigvals = es.eigenvalues();
+
+        double curl_n = coeff_t1[1] - coeff_t0[2];
+        std::string surf_type = "";
+        bool is_complex = (std::abs(eigvals[0].imag()) > TOL || std::abs(eigvals[1].imag()) > TOL);
+
+        if (is_complex) {
+            if (std::abs(Q_local) > 0.1) {
+                surf_type = (eigvals[0].real() > 0) ? "meron_(spiral_source)" : "meron_(spiral_sink)";
+            } else {
+                surf_type = (eigvals[0].real() > 0) ? "vortex_(spiral_source)" : "vortex_(spiral_sink)";
+            }
+        } else {
+            if ((eigvals[0].real() > 0 && eigvals[1].real() < 0) || (eigvals[0].real() < 0 && eigvals[1].real() > 0)) {
+                if (std::abs(Q_local) > 0.1) {
+                    surf_type = "anti-meron_(saddle)";
+                } else {
+                    surf_type = "anti-vortex_(saddle)";
+                }
+            } else {
+                surf_type = (eigvals[0].real() > 0) ? "source" : "sink";
+            }
+        }
+
+        return std::make_unique<SurfaceSingularityResult>(SurfaceSingularityResult{
+            current_iter, current_time, sol_cartesian, curl_n, eigvals, surf_type, p_val, Q_local
+        });
+    }
+    return nullptr; 
+}
+
+// --- MAIN ---
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Erreur : Nom du fichier maillage (.msh) manquant.\n";
+        return 1;
+    }
+    std::string msh_file = argv[1];
+
+    std::vector<std::pair<int, std::string>> sol_files;
+    if (!fs::exists(DIRECTORY_PATH)) {
+        std::cerr << "Dossier '" << DIRECTORY_PATH << "' inexistant.\n";
+        return 1;
+    }
+
+    for (const auto& entry : fs::directory_iterator(DIRECTORY_PATH)) {
+        std::string filename = entry.path().filename().string();
+        if (entry.path().extension() == ".sol") {
+            try {
+                std::regex re(R"(.*_iter(\d+)\.sol)");
+                std::smatch match;
+                int num = -1;
+                if (std::regex_match(filename, match, re)) {
+                    num = std::stoi(match[1].str()); 
+                }
+                sol_files.push_back({num, entry.path().string()});
+            } catch (...) {
+                sol_files.push_back({0, entry.path().string()});
+            }
+        }
+    }
+
+    if (sol_files.empty()) {
+        std::cerr << "Aucun fichier solution (*.sol) trouvé.\n";
+        return 1;
+    }
+
+    std::sort(sol_files.begin(), sol_files.end());
+    std::cout << sol_files.size() << " fichiers solutions trouvés et triés.\n";
+
+    Eigen::MatrixXd initial_mag;
+    double dummy_time = 0.0;
+    try {
+        initial_mag = load_magnetization(sol_files[0].second, dummy_time);
+    } catch (const std::exception& e) {
+        std::cerr << "Erreur lors du pré-chargement : " << e.what() << "\n";
+        return 1;
+    }
+
+    auto mesh_start = std::chrono::high_resolution_clock::now();
+    std::cout << "Chargement unique du maillage : " << msh_file << "...\n";
+    Mesh mesh;
+    try {
+        mesh = load_mesh_gmsh(msh_file, initial_mag.rows());
+    } catch (const std::exception& e) {
+        std::cerr << "Erreur de maillage : " << e.what() << "\n";
+        return 1;
+    }
+    
+    mesh.triangles = orient_triangles_outward(mesh.points, mesh.tetrahedrons, mesh.triangles);
+    mesh.node_normals = compute_node_normals(mesh.points, mesh.triangles);
+    
+    auto mesh_end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> mesh_duration = mesh_end - mesh_start;
+    std::cout << "=> Temps de traitement du maillage : " << mesh_duration.count() << " secondes.\n";
+
+    std::vector<BlochPointResult> global_bloch_points;
+    std::vector<SurfaceSingularityResult> global_surface_singularities;
+
+    auto sol_start = std::chrono::high_resolution_clock::now(); 
+    for (const auto& [iter, file_path] : sol_files) {
+        double current_time = 0.0;
+        Eigen::MatrixXd mag;
+        try {
+            mag = load_magnetization(file_path, current_time);
+        } catch (const std::exception& e) {
+            std::cerr << "Échec de lecture pour " << file_path << ", ignoré.\n";
+            continue;
+        }
+
+        std::cout << "\n---------------------------------------------\n";
+        std::cout << "Traitement de : " << file_path << " (Iteration: " << iter << ")\n";
+
+        // CORRECTION SÉCURITÉ : La solution peut être plus petite que la matrice points globale réallouée
+        if (mag.rows() > mesh.points.rows()) {
+            std::cerr << "Incohérence critique de taille de nœuds dans " << file_path << ", ignoré.\n";
+            continue;
+        }
+
+        // --- ANALYSE VOLUME ---
+        for (const auto& nodes_idx : mesh.tetrahedrons) {
+            // Double sécurité : s'assurer que les indices du tétraèdre rentrent dans la matrice mag courante
+            if (nodes_idx[0] >= mag.rows() || nodes_idx[1] >= mag.rows() || 
+                nodes_idx[2] >= mag.rows() || nodes_idx[3] >= mag.rows()) continue;
+
+            Matrix34d t_coords, t_mag; 
+            for(int i = 0; i < 4; ++i) {
+                t_coords.col(i) = mesh.points.row(nodes_idx[i]);
+                t_mag.col(i) = mag.row(nodes_idx[i]);
+            }
+
+            auto sign_check = [](const Matrix34d& m, int axis) {
+                bool has_pos = false, has_neg = false;
+                for(int i = 0; i < 4; ++i) {
+                    if(m(axis, i) > 0) has_pos = true;
+                    if(m(axis, i) < 0) has_neg = true;
+                }
+                return has_pos && has_neg;
+            };
+
+            if (sign_check(t_mag, 0) && sign_check(t_mag, 1) && sign_check(t_mag, 2)) {
+                auto res_bp = analyze_bloch_point(iter, current_time, t_coords, t_mag);
+                if (res_bp) {
+                    std::printf(" -> [BP Volume] détecté à : [%.5f, %.5f, %.5f]\n", res_bp->pos.x(), res_bp->pos.y(), res_bp->pos.z());
+                    global_bloch_points.push_back(*res_bp);
+                }
+            }
+        }
+
+        // --- ANALYSE SURFACE ---
+        for (const auto& nodes_idx : mesh.triangles) {
+            // Double sécurité : s'assurer que les indices du triangle rentrent dans la matrice mag courante
+            if (nodes_idx[0] >= mag.rows() || nodes_idx[1] >= mag.rows() || nodes_idx[2] >= mag.rows()) continue;
+
+            Eigen::Matrix3d s_coords, s_mag, s_normals; 
+            for(int i = 0; i < 3; ++i) {
+                s_coords.col(i) = mesh.points.row(nodes_idx[i]);
+                s_mag.col(i) = mag.row(nodes_idx[i]);
+                s_normals.col(i) = mesh.node_normals.row(nodes_idx[i]); 
+            }
+
+            auto res_surf = analyze_surface_singularity(iter, current_time, s_coords, s_mag, s_normals);
+            if (res_surf) {
+                std::printf(" -> [Singularité Surface] (%s) à : [%.5f, %.5f, %.5f] nm | Pol: %+.2f | Q_topo: %+.4f\n",
+                            res_surf->type.c_str(), res_surf->pos.x(), res_surf->pos.y(), res_surf->pos.z(), res_surf->polarity, res_surf->topological_charge);
+                global_surface_singularities.push_back(*res_surf);
+            }
+        }
+    }
+
+    auto sol_end = std::chrono::high_resolution_clock::now(); 
+    std::chrono::duration<double> sol_duration = sol_end - sol_start;
+
+    std::ofstream f_vol("all_volume_bloch_points.txt");
+    if (f_vol.is_open()) {
+        f_vol << "#iter\ttime\tx\ty\tz\tcurl_x\tcurl_y\tcurl_z\ttype\n";
+        for (const auto& bp : global_bloch_points) {
+            f_vol << bp.iter << "\t" << bp.time << "\t" << bp.pos.x() << "\t" << bp.pos.y() << "\t" << bp.pos.z() << "\t"
+                  << bp.curl.x() << "\t" << bp.curl.y() << "\t" << bp.curl.z() << "\t" << bp.type << "\n";
+        }
+    }
+
+    std::ofstream f_surf("all_surface_singularities.txt");
+    if (f_surf.is_open()) {
+        f_surf << "#iter\ttime\tx\ty\tz\tcurl_n\tpolarity\tQ_topology\ttype\n";
+        for(const auto& ss : global_surface_singularities) {
+            f_surf << ss.iter << "\t" << ss.time << "\t" << ss.pos.x() << "\t" << ss.pos.y() << "\t" << ss.pos.z() << "\t"
+                   << ss.curl_n << "\t" << ss.polarity << "\t" << ss.topological_charge << "\t" << ss.type << "\n";
+        }
+    }
+
+    std::cout << "\nAnalyses multi-fichiers et exports complets terminés.\n";
+    return 0;
+}
