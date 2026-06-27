@@ -681,8 +681,6 @@ int main(int argc, char* argv[]) {
     }
     // Appel obligatoire de la fonction d'orientation pour corriger les normales de surface face au volume
     mesh.triangles = orient_triangles_outward(mesh.points, mesh.tetrahedrons, mesh.triangles);
-    mesh.node_normals = compute_node_normals(mesh.points, mesh.triangles);
-
     auto mesh_end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> mesh_duration = mesh_end - mesh_start;
     std::cout << "=> Temps de traitement du maillage : " << mesh_duration.count() << " secondes.\n";

@@ -1,3 +1,3 @@
-#iter	time	x	y	z	curl_n	polarity	Q_topology	type
-0	0	-0.634392	-1.2698	-50	1.05823e-10	-0.906962	-0.0174158	source
-0	0	0.634392	-1.2698	50	-1.05823e-10	0.906962	0.0174158	source
+#iter   time                    x         y         z      curl_n  polarity  Q_topology     eig0_re     eig0_im     eig1_re     eig1_im  type
+0       0.000000e+00      -0.6344   -1.2698  -50.0000      0.0000     -0.91     -0.0174      0.1334      0.0000      0.1358      0.0000  source
+0       0.000000e+00       0.6344   -1.2698   50.0000     -0.0000      0.91      0.0174      0.1334      0.0000      0.1358      0.0000  source

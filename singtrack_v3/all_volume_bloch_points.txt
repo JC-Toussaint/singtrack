@@ -1,1 +1,1 @@
-#iter	time	x	y	z	curl_x	curl_y	curl_z	type
+#iter   time                    x         y         z    curl_x    curl_y    curl_z     eig0_re     eig0_im     eig1_re     eig1_im     eig2_re     eig2_im  type
