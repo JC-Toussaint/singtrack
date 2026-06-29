@@ -602,9 +602,28 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
     Eigen::Vector3d t0 = v1.normalized(); // Premier vecteur tangent unitaire aligné sur l'arête 1
     Eigen::Vector3d t1 = n.cross(t0);    // Second vecteur tangent unitaire orthogonal à t0 dans le plan
 
+#ifdef INPLANE
     // Projection du champ tridimensionnel d'aimantation des 3 nœuds sur ce repère local (t0, t1, n)
     Eigen::Vector3d m_t0 = ns_mag.transpose() * t0; // Composantes tangentielles m_t0 au nœud 0, 1, 2
     Eigen::Vector3d m_t1 = ns_mag.transpose() * t1; // Composantes tangentielles m_t1 au nœud 0, 1, 2
+
+#else
+    // --- NOUVELLE MÉTHODE : DOUBLE PROJECTION (Plan tangent nodal puis Plan du triangle) ---
+    Eigen::Vector3d m_t0 = Eigen::Vector3d::Zero();
+    Eigen::Vector3d m_t1 = Eigen::Vector3d::Zero();
+
+    for (int i = 0; i < 3; ++i) {
+        Eigen::Vector3d m_i = ns_mag.col(i);
+        Eigen::Vector3d n_node = ns_normals.col(i);
+
+        // 1. Projection de m sur le plan tangent local du noeud i (m_magenta)
+        Eigen::Vector3d m_magenta = m_i - m_i.dot(n_node) * n_node;
+
+        // 2. Projection de m_magenta sur la base du triangle (t0, t1)
+        m_t0[i] = m_magenta.dot(t0);
+        m_t1[i] = m_magenta.dot(t1);
+    }
+#endif
 
     // Projection des coordonnées 3D réelles dans le plan 2D projeté pour l'interpolation spatiale
     Eigen::Vector3d c_t0 = ns_coords.transpose() * t0;
@@ -623,7 +642,7 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
     Eigen::Vector2d vec_local = -1.0 * A_surf.colPivHouseholderQr().solve(Eigen::Vector2d(m_t0[0], m_t1[0]));
 
     // Le point singulier de surface se trouve-t-il dans les limites physiques du triangle ?
-    if (vec_local[0] > 0 && vec_local[1] > 0 && (vec_local[0] + vec_local[1] < 1)) {
+    if (vec_local[0] >= 0 && vec_local[1] >= 0 && (vec_local[0] + vec_local[1] <= 1)) {
         // Reconstruction tridimensionnelle de la position exacte de la singularité de surface
         Eigen::Vector3d sol_cartesian = ns_coords.col(0) + vec_local[0] * v1 + vec_local[1] * v2;
         
