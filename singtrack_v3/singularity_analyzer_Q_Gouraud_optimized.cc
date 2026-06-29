@@ -782,6 +782,9 @@ int main(int argc, char* argv[]) {
     std::vector<BlochPointResult> global_bloch_points;
     std::vector<SurfaceSingularityResult> global_surface_singularities;
 
+    // Booleen de synchronisation OpenMP pour exporter fine_mesh une seule fois
+    bool fine_mesh_exported = false;
+
     // 4. BOUCLE PRINCIPALE SUR TOUTES LES SOLUTIONS CHRONOLOGIQUES
     // OPTIM : parallélisation OpenMP des itérations temporelles, qui sont indépendantes entre elles.
     // Chaque thread traite un fichier .sol complet. Les résultats sont collectés dans des vecteurs locaux
@@ -796,7 +799,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::vector<BlochPointResult>>          thread_bloch(N_sol);
     std::vector<std::vector<SurfaceSingularityResult>>  thread_surf(N_sol);
 
-    #pragma omp parallel for schedule(dynamic,1) shared(base_mesh, sol_vec, thread_bloch, thread_surf)
+    #pragma omp parallel for schedule(dynamic,1) shared(base_mesh, sol_vec, thread_bloch, thread_surf, fine_mesh_exported)
     for (int fi = 0; fi < N_sol; ++fi) {
         const auto& [iter, file_path] = sol_vec[fi];
         double current_time = 0.0;
@@ -829,6 +832,34 @@ int main(int argc, char* argv[]) {
         Eigen::MatrixXd fine_mag;
         Mesh fine_mesh = subdivide_surface_pn(base_mesh, mag, fine_mag);
         fine_mesh.node_normals = compute_node_normals(fine_mesh.points, fine_mesh.triangles);
+
+        // --- AJOUT : SAUVEGARDE DU MAILLAGE AFFINÉ (FINE_MESH) UNE SEULE FOIS ---
+        // Utilisation d'un bloc critique pour éviter les accès simultanés en écriture fichier par les threads.
+        #pragma omp critical(fine_mesh_export_zone)
+        {
+            if (!fine_mesh_exported) {
+                std::cout << "Exportation géométrique du maillage affine fine_mesh dans 'fine_mesh.out'...\n";
+                std::ofstream f_fine("fine_mesh.out");
+                if (f_fine.is_open()) {
+                    f_fine << std::left << std::setw(8) << "#id_node" 
+                           << std::right << std::setw(15) << "x" 
+                           << std::setw(15) << "y" 
+                           << std::setw(15) << "z" << "\n";
+                    for (int i = 0; i < fine_mesh.points.rows(); ++i) {
+                        f_fine << std::left << std::setw(8) << (i + 1) // Indexation base 1 standard pour les fichiers de maillage
+                               << std::right << std::fixed << std::setprecision(6)
+                               << std::setw(15) << fine_mesh.points(i, 0)
+                               << std::setw(15) << fine_mesh.points(i, 1)
+                               << std::setw(15) << fine_mesh.points(i, 2) << "\n";
+                    }
+                    f_fine.close();
+                    std::cout << "=> Fin de l'export (" << fine_mesh.points.rows() << " noeuds enregistres).\n";
+                } else {
+                    std::cerr << "Erreur : Impossible de creer le fichier fine_mesh.out\n";
+                }
+                fine_mesh_exported = true; // Empêche les autres threads de réécrire le fichier
+            }
+        }
 
         // --- ANALYSE VOLUME (Parcours exhaustif de tous les tétraèdres du domaine) ---
         for (const auto& nodes_idx : base_mesh.tetrahedrons) {
