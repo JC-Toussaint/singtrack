@@ -39,6 +39,14 @@ struct Mesh {
     Eigen::MatrixXd node_normals;              // Normale lissée à chaque sommet
 };
 
+// Structure pour identifier une arête unique (Subdivision)
+struct Edge {
+    int v1, v2;
+    bool operator<(const Edge& other) const {
+        return std::tie(v1, v2) < std::tie(other.v1, other.v2);
+    }
+};
+
 // Structures de résultats complètes pour l'analyse topologique interne (Volume)
 struct BlochPointResult {
     int iter;                 // Numéro de l'itération temporelle issue du fichier .sol
@@ -370,6 +378,56 @@ Eigen::MatrixXd compute_node_normals(const Eigen::MatrixXd& points, const std::v
     return node_normals;
 }
 
+// --- APPROCHE A : SUBDIVISION PN-TRIANGLE ET INTERPOLATION DE L'AIMANTATION ---
+Mesh subdivide_surface_pn(const Mesh& original_mesh, const Eigen::MatrixXd& original_mag, Eigen::MatrixXd& out_fine_mag) {
+    Mesh fine_mesh;
+    fine_mesh.points = original_mesh.points;
+    fine_mesh.tetrahedrons = original_mesh.tetrahedrons; 
+
+    out_fine_mag = original_mag; // Initialisation de la matrice d'aimantation fine
+
+    std::map<Edge, int> midpoints_map;
+
+    auto get_or_create_pn_midpoint = [&](int iA, int iB) {
+        int v1 = std::min(iA, iB); int v2 = std::max(iA, iB);
+        Edge edge{v1, v2};
+        if (midpoints_map.find(edge) != midpoints_map.end()) return midpoints_map[edge];
+
+        Eigen::Vector3d P1 = original_mesh.points.row(v1), P2 = original_mesh.points.row(v2);
+        Eigen::Vector3d N1 = original_mesh.node_normals.row(v1), N2 = original_mesh.node_normals.row(v2);
+
+        // Correction Géométrique Géométrique PN-Triangle
+        double d1 = (P2 - P1).dot(N1); double d2 = (P1 - P2).dot(N2);
+        Eigen::Vector3d P_corrected = 0.5 * (P1 + P2) + 0.125 * (d1 * N1 + d2 * N2);
+
+        // --- INTERPOLATION PHYSIQUE DE L'AIMANTATION ---
+        Eigen::Vector3d M1 = original_mag.row(v1), M2 = original_mag.row(v2);
+        Eigen::Vector3d M_interpolated = (0.5 * (M1 + M2)).normalized(); // Normalisation stricte |m| = 1
+
+        int new_idx = fine_mesh.points.rows();
+        fine_mesh.points.conservativeResize(new_idx + 1, 3);
+        fine_mesh.points.row(new_idx) = P_corrected;
+
+        out_fine_mag.conservativeResize(new_idx + 1, 3);
+        out_fine_mag.row(new_idx) = M_interpolated;
+
+        midpoints_map[edge] = new_idx;
+        return new_idx;
+    };
+
+    for (const auto& tri : original_mesh.triangles) {
+        int m01 = get_or_create_pn_midpoint(tri[0], tri[1]);
+        int m12 = get_or_create_pn_midpoint(tri[1], tri[2]);
+        int m20 = get_or_create_pn_midpoint(tri[2], tri[0]);
+
+        fine_mesh.triangles.push_back(Eigen::Vector3i(tri[0], m01, m20));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m01, tri[1], m12));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m20, m12, tri[2]));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m01, m12, m20));
+    }
+    return fine_mesh;
+}
+
 // --- ANALYSE POINT DE BLOCH (VOLUME) ---
 // Un point de Bloch est une singularité topologique micromagnétique ponctuelle où l'aimantation s'annule localement (\vec{m} = \vec{0}).
 // On utilise une interpolation affine de l'aimantation à l'intérieur du tétraèdre pour trouver ce zéro et caractériser le champ.
@@ -480,135 +538,6 @@ std::unique_ptr<BlochPointResult> analyze_bloch_point(int current_iter, double c
 // --- ANALYSE SINGULARITÉ DE SURFACE ---
 // Traite les défauts topologiques bidimensionnels sur la frontière externe de l'échantillon (ex: vortex de surface, défauts de type cross/meron).
 // Nécessite une projection dans le plan tangent local du triangle.
-// std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int current_iter, double current_time, const Eigen::Matrix3d& ns_coords, const Eigen::Matrix3d& ns_mag, const Eigen::Matrix3d& ns_normals) {
-//     // Calcul des vecteurs tangents définissant la surface plane du triangle
-//     Eigen::Vector3d v1 = ns_coords.col(1) - ns_coords.col(0);
-//     Eigen::Vector3d v2 = ns_coords.col(2) - ns_coords.col(0);
-//     Eigen::Vector3d n = v1.cross(v2); // Produit vectoriel pour obtenir la normale géométrique
-//     double n_norm = n.norm();
-//     if (n_norm == 0) return nullptr; // Sécurité : évite les triangles plats d'aire nulle
-//     n.normalize(); // Normalisation de \vec{n} pour obtenir un vecteur unitaire
-
-//     // --- ENTRÉE DE L'INVARIANT TOPOLOGIQUE RIGOUREUX (Formule de Berg-Lüscher pour triangle discret) ---
-//     // Récupération des vecteurs d'aimantation tridimensionnels unitaires bruts aux 3 sommets du triangle
-//     Eigen::Vector3d m0 = ns_mag.col(0);
-//     Eigen::Vector3d m1 = ns_mag.col(1);
-//     Eigen::Vector3d m2 = ns_mag.col(2);
-
-//     // Calcul du produit mixte (\vec{m}_0 \cdot (\vec{m}_1 \times \vec{m}_2)) -> Numérateur du triangle sphérique
-//     double triple_product = m0.dot(m1.cross(m2));
-//     // Calcul du dénominateur d'angle solide sphérique de Berg-Lüscher
-//     double denominator = 1.0 + m0.dot(m1) + m1.dot(m2) + m2.dot(m0);
-
-//     double Q_local = 0.0;
-//     if (std::abs(denominator) > TOL) {
-//         // L'utilisation de std::atan2 garantit une extraction exacte de l'angle solide signé sur la sphère unité
-//         Q_local = (2.0 * std::atan2(triple_product, denominator)) / (4.0 * M_PI);
-//     }
-//     // --------------------------------------------------------------------------------------------------
-
-//     // Création d'un repère local orthonormé direct (t0, t1, n) attaché au plan du triangle
-//     Eigen::Vector3d t0 = v1.normalized(); // Premier vecteur tangent unitaire aligné sur l'arête 1
-//     Eigen::Vector3d t1 = n.cross(t0);    // Second vecteur tangent unitaire orthogonal à t0 dans le plan
-
-//     // Projection du champ tridimensionnel d'aimantation des 3 nœuds sur ce repère local (t0, t1, n)
-//     Eigen::Vector3d m_t0 = ns_mag.transpose() * t0; // Composantes tangentielles m_t0 au nœud 0, 1, 2
-//     Eigen::Vector3d m_t1 = ns_mag.transpose() * t1; // Composantes tangentielles m_t1 au nœud 0, 1, 2
-
-//     // Projection des coordonnées 3D réelles dans le plan 2D projeté pour l'interpolation spatiale
-//     Eigen::Vector3d c_t0 = ns_coords.transpose() * t0;
-//     Eigen::Vector3d c_t1 = ns_coords.transpose() * t1;
-
-//     // Détermination de la présence d'une singularité de surface (où la projection tangentielle du champ s'annule : m_t0 = 0 et m_t1 = 0)
-//     Eigen::Matrix2d A_surf;
-//     A_surf(0, 0) = m_t0[1] - m_t0[0];
-//     A_surf(0, 1) = m_t1[1] - m_t1[0];
-//     A_surf(1, 0) = m_t0[2] - m_t0[0];
-//     A_surf(1, 1) = m_t1[2] - m_t1[0];
-
-//     if (std::abs(A_surf.determinant()) < TOL) return nullptr; // Système singulier non inversible
-
-//     // Résolution 2D pour trouver les facteurs de pondération (coordonnées locales dans le triangle)
-//     Eigen::Vector2d vec_local = -1.0 * A_surf.colPivHouseholderQr().solve(Eigen::Vector2d(m_t0[0], m_t1[0]));
-
-//     // Le point singulier de surface se trouve-t-il dans les limites physiques du triangle ?
-//     if (vec_local[0] > 0 && vec_local[1] > 0 && (vec_local[0] + vec_local[1] < 1)) {
-//         // Reconstruction tridimensionnelle de la position exacte de la singularité de surface
-//         Eigen::Vector3d sol_cartesian = ns_coords.col(0) + vec_local[0] * v1 + vec_local[1] * v2;
-        
-// 	// --- CONTRIBUTION : INTERPOLATION DE LA NORMALE (Gouraud/Phong Shading) ---
-//         Eigen::Vector3d n_interpolated = ns_normals.col(0) + vec_local[0] * (ns_normals.col(1) - ns_normals.col(0)) 
-//                                                            + vec_local[1] * (ns_normals.col(2) - ns_normals.col(0));
-//         n_interpolated.normalize(); 
-
-//         // --- EXTRACTION DE LA POLARITÉ AU CENTRE (Composante normale brute de m) ---
-//         // Interpolation de l'aimantation 3D cartésienne complète au point exact du défaut
-//         Eigen::Vector3d mag_at_defect = ns_mag.col(0) + vec_local[0] * (ns_mag.col(1) - ns_mag.col(0)) + vec_local[1] * (ns_mag.col(2) - ns_mag.col(0));
-//         // La polarité p_val est la projection du champ total sur la normale externe unitaire
-//         double p_val = mag_at_defect.dot(n_interpolated);
-//         // ----------------------------------------------------------------------------
-
-//         // Montage du système d'interpolation linéaire 2D pour évaluer le Jacobien plan (matrice M_matrix)
-//         Eigen::Matrix3d M_matrix;
-//         M_matrix.col(0) = Eigen::Vector3d::Ones();
-//         M_matrix.col(1) = c_t0;
-//         M_matrix.col(2) = c_t1;
-
-//         if (std::abs(M_matrix.determinant()) < TOL) return nullptr;
-//         Eigen::Matrix3d inv_M = M_matrix.inverse();
-
-//         // Calcul des gradients bidimensionnels des composantes tangentielles de l'aimantation
-//         Eigen::Vector3d coeff_t0 = inv_M * m_t0; // Dérivées de m_t0 par rapport au repère plan
-//         Eigen::Vector3d coeff_t1 = inv_M * m_t1; // Dérivées de m_t1 par rapport au repère plan
-
-//         // Constitution du Jacobien réduit de surface (2 lignes, 2 colonnes)
-//         Eigen::Matrix2d jac_2d;
-//         jac_2d(0, 0) = coeff_t0[1]; jac_2d(0, 1) = coeff_t0[2]; // [\partial m_t0 / \partial t0,  \partial m_t0 / \partial t1]
-//         jac_2d(1, 0) = coeff_t1[1]; jac_2d(1, 1) = coeff_t1[2]; // [\partial m_t1 / \partial t0,  \partial m_t1 / \partial t1]
-
-//         // Résolution spectrale de la matrice 2D pour extraire les deux valeurs propres complexes
-//         Eigen::EigenSolver<Eigen::Matrix2d> es(jac_2d);
-//         Eigen::Vector2cd eigvals = es.eigenvalues();
-
-//         // Évaluation de la composante normale du rotationnel (\partial m_t1 / \partial t0 - \partial m_t0 / \partial t1)
-//         double curl_n = coeff_t1[1] - coeff_t0[2];
-//         std::string surf_type = "";
-
-//         // Une partie imaginaire non nulle traduit un enroulement circulaire/spiral (Vortex ou Méron)
-//         bool is_complex = (std::abs(eigvals[0].imag()) > TOL || std::abs(eigvals[1].imag()) > TOL);
-
-//         if (is_complex) {
-//             // Utilisation exclusive et non arbitraire de la charge topologique discrète Q_local :
-//             // Si la facette triangulaire présente une distorsion topologique notable (|Q_local| > 0.1), c'est la signature d'un Méron.
-//             if (std::abs(Q_local) > 0.1) {
-//                 surf_type = (eigvals[0].real() > 0) ? "meron_(spiral_source)" : "meron_(spiral_sink)";
-//             } else {
-//                 surf_type = (eigvals[0].real() > 0) ? "vortex_(spiral_source)" : "vortex_(spiral_sink)";
-//             }
-//         } else {
-//             // Valeurs propres réelles : si elles sont de signes opposés, c'est une configuration de type point-selle (Saddle)
-//             if ((eigvals[0].real() > 0 && eigvals[1].real() < 0) || (eigvals[0].real() < 0 && eigvals[1].real() > 0)) {
-//                 // Distinction rigoureuse entre un anti-vortex plan standard et un anti-méron par l'invariant
-//                 if (std::abs(Q_local) > 0.1) {
-//                     surf_type = "anti-meron_(saddle)";
-//                 } else {
-//                     surf_type = "anti-vortex_(saddle)";
-//                 }
-//             } else {
-//                 // Sinon, c'est un nœud divergent (Source) ou convergent (Sink)
-//                 surf_type = (eigvals[0].real() > 0) ? "source" : "sink";
-//             }
-//         }
-
-//         // Retourne le conteneur incluant à la fois la polarité brute p_val ET la charge topologique globale Q_local
-//         return std::make_unique<SurfaceSingularityResult>(SurfaceSingularityResult{
-//             current_iter, current_time, sol_cartesian, curl_n, eigvals, surf_type, p_val, Q_local
-//         });
-//     }
-//     return nullptr; // Pas de singularité détectée sur cette facette de surface
-// }
-
-// --- ANALYSE SINGULARITÉ DE SURFACE ---
 std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int current_iter, double current_time, const Eigen::Matrix3d& ns_coords, const Eigen::Matrix3d& ns_mag, const Eigen::Matrix3d& ns_normals) {
     // Calcul des vecteurs tangents définissant la surface plane du triangle
     Eigen::Vector3d v1 = ns_coords.col(1) - ns_coords.col(0);
@@ -618,16 +547,20 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
     if (n_norm == 0) return nullptr; // Sécurité : évite les triangles plats d'aire nulle
     n.normalize(); // Normalisation de \vec{n} pour obtenir un vecteur unitaire
 
-    // --- ENTRÉE DE L'INVARIANT TOPOLOGIQUE RIGOUREUX (Formule de Berg-Lüscher) ---
+    // --- ENTRÉE DE L'INVARIANT TOPOLOGIQUE RIGOUREUX (Formule de Berg-Lüscher pour triangle discret) ---
+    // Récupération des vecteurs d'aimantation tridimensionnels unitaires bruts aux 3 sommets du triangle
     Eigen::Vector3d m0 = ns_mag.col(0);
     Eigen::Vector3d m1 = ns_mag.col(1);
     Eigen::Vector3d m2 = ns_mag.col(2);
 
+    // Calcul du produit mixte (\vec{m}_0 \cdot (\vec{m}_1 \times \vec{m}_2)) -> Numérateur du triangle sphérique
     double triple_product = m0.dot(m1.cross(m2));
+    // Calcul du dénominateur d'angle solide sphérique de Berg-Lüscher
     double denominator = 1.0 + m0.dot(m1) + m1.dot(m2) + m2.dot(m0);
 
     double Q_local = 0.0;
     if (std::abs(denominator) > TOL) {
+        // L'utilisation de std::atan2 garantit une extraction exacte de l'angle solide signé sur la sphère unité
         Q_local = (2.0 * std::atan2(triple_product, denominator)) / (4.0 * M_PI);
     }
     // --------------------------------------------------------------------------------------------------
@@ -636,28 +569,15 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
     Eigen::Vector3d t0 = v1.normalized(); // Premier vecteur tangent unitaire aligné sur l'arête 1
     Eigen::Vector3d t1 = n.cross(t0);    // Second vecteur tangent unitaire orthogonal à t0 dans le plan
 
-    // --- NOUVELLE MÉTHODE : DOUBLE PROJECTION (Plan tangent nodal puis Plan du triangle) ---
-    Eigen::Vector3d m_t0 = Eigen::Vector3d::Zero();
-    Eigen::Vector3d m_t1 = Eigen::Vector3d::Zero();
-
-    for (int i = 0; i < 3; ++i) {
-        Eigen::Vector3d m_i = ns_mag.col(i);
-        Eigen::Vector3d n_node = ns_normals.col(i);
-
-        // 1. Projection de m sur le plan tangent local du noeud i (m_magenta)
-        Eigen::Vector3d m_magenta = m_i - m_i.dot(n_node) * n_node;
-
-        // 2. Projection de m_magenta sur la base du triangle (t0, t1)
-        m_t0[i] = m_magenta.dot(t0);
-        m_t1[i] = m_magenta.dot(t1);
-    }
-    // ---------------------------------------------------------------------------------------
+    // Projection du champ tridimensionnel d'aimantation des 3 nœuds sur ce repère local (t0, t1, n)
+    Eigen::Vector3d m_t0 = ns_mag.transpose() * t0; // Composantes tangentielles m_t0 au nœud 0, 1, 2
+    Eigen::Vector3d m_t1 = ns_mag.transpose() * t1; // Composantes tangentielles m_t1 au nœud 0, 1, 2
 
     // Projection des coordonnées 3D réelles dans le plan 2D projeté pour l'interpolation spatiale
     Eigen::Vector3d c_t0 = ns_coords.transpose() * t0;
     Eigen::Vector3d c_t1 = ns_coords.transpose() * t1;
 
-    // Détermination de la présence d'une singularité de surface
+    // Détermination de la présence d'une singularité de surface (où la projection tangentielle du champ s'annule : m_t0 = 0 et m_t1 = 0)
     Eigen::Matrix2d A_surf;
     A_surf(0, 0) = m_t0[1] - m_t0[0];
     A_surf(0, 1) = m_t1[1] - m_t1[0];
@@ -666,7 +586,7 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
 
     if (std::abs(A_surf.determinant()) < TOL) return nullptr; // Système singulier non inversible
 
-    // Résolution 2D pour trouver vec_local
+    // Résolution 2D pour trouver les facteurs de pondération (coordonnées locales dans le triangle)
     Eigen::Vector2d vec_local = -1.0 * A_surf.colPivHouseholderQr().solve(Eigen::Vector2d(m_t0[0], m_t1[0]));
 
     // Le point singulier de surface se trouve-t-il dans les limites physiques du triangle ?
@@ -674,16 +594,19 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
         // Reconstruction tridimensionnelle de la position exacte de la singularité de surface
         Eigen::Vector3d sol_cartesian = ns_coords.col(0) + vec_local[0] * v1 + vec_local[1] * v2;
         
-        // Interpolation de la normale (Gouraud/Phong Shading)
+	// --- CONTRIBUTION : INTERPOLATION DE LA NORMALE (Gouraud/Phong Shading) ---
         Eigen::Vector3d n_interpolated = ns_normals.col(0) + vec_local[0] * (ns_normals.col(1) - ns_normals.col(0)) 
                                                            + vec_local[1] * (ns_normals.col(2) - ns_normals.col(0));
         n_interpolated.normalize(); 
 
-        // Extraction de la polarité au centre (Composante normale brute de m)
+        // --- EXTRACTION DE LA POLARITÉ AU CENTRE (Composante normale brute de m) ---
+        // Interpolation de l'aimantation 3D cartésienne complète au point exact du défaut
         Eigen::Vector3d mag_at_defect = ns_mag.col(0) + vec_local[0] * (ns_mag.col(1) - ns_mag.col(0)) + vec_local[1] * (ns_mag.col(2) - ns_mag.col(0));
+        // La polarité p_val est la projection du champ total sur la normale externe unitaire
         double p_val = mag_at_defect.dot(n_interpolated);
+        // ----------------------------------------------------------------------------
 
-        // Montage du système d'interpolation linéaire 2D pour évaluer le Jacobien plan
+        // Montage du système d'interpolation linéaire 2D pour évaluer le Jacobien plan (matrice M_matrix)
         Eigen::Matrix3d M_matrix;
         M_matrix.col(0) = Eigen::Vector3d::Ones();
         M_matrix.col(1) = c_t0;
@@ -692,15 +615,16 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
         if (std::abs(M_matrix.determinant()) < TOL) return nullptr;
         Eigen::Matrix3d inv_M = M_matrix.inverse();
 
-        // Calcul des gradients bidimensionnels (utilise les m_t0 et m_t1 modifiés)
-        Eigen::Vector3d coeff_t0 = inv_M * m_t0; 
-        Eigen::Vector3d coeff_t1 = inv_M * m_t1; 
+        // Calcul des gradients bidimensionnels des composantes tangentielles de l'aimantation
+        Eigen::Vector3d coeff_t0 = inv_M * m_t0; // Dérivées de m_t0 par rapport au repère plan
+        Eigen::Vector3d coeff_t1 = inv_M * m_t1; // Dérivées de m_t1 par rapport au repère plan
 
-        // Constitution du Jacobien réduit de surface
+        // Constitution du Jacobien réduit de surface (2 lignes, 2 colonnes)
         Eigen::Matrix2d jac_2d;
-        jac_2d(0, 0) = coeff_t0[1]; jac_2d(0, 1) = coeff_t0[2]; 
-        jac_2d(1, 0) = coeff_t1[1]; jac_2d(1, 1) = coeff_t1[2]; 
+        jac_2d(0, 0) = coeff_t0[1]; jac_2d(0, 1) = coeff_t0[2]; // [\partial m_t0 / \partial t0,  \partial m_t0 / \partial t1]
+        jac_2d(1, 0) = coeff_t1[1]; jac_2d(1, 1) = coeff_t1[2]; // [\partial m_t1 / \partial t0,  \partial m_t1 / \partial t1]
 
+        // Résolution spectrale de la matrice 2D pour extraire les deux valeurs propres complexes
         Eigen::EigenSolver<Eigen::Matrix2d> es(jac_2d);
         Eigen::Vector2cd eigvals = es.eigenvalues();
 
@@ -741,6 +665,7 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
     }
     return nullptr; // Pas de singularité détectée sur cette facette de surface
 }
+
 // --- MAIN ---
 int main(int argc, char* argv[]) {
     // 0. Récupération du fichier maillage (.msh) depuis la ligne de commande
@@ -805,16 +730,16 @@ int main(int argc, char* argv[]) {
     // 3. CHARGEMENT ET CORRECTION DU MAILLAGE (UNE SEULE FOIS)
     auto mesh_start = std::chrono::high_resolution_clock::now();
     std::cout << "Chargement unique du maillage : " << msh_file << "...\n";
-    Mesh mesh;
+    Mesh base_mesh;
     try {
-        mesh = load_mesh_gmsh(msh_file, initial_mag.rows());
+        base_mesh = load_mesh_gmsh(msh_file, initial_mag.rows());
     } catch (const std::exception& e) {
         std::cerr << "Erreur de maillage : " << e.what() << "\n";
         return 1;
     }
     // Appel obligatoire de la fonction d'orientation pour corriger les normales de surface face au volume
-    mesh.triangles = orient_triangles_outward(mesh.points, mesh.tetrahedrons, mesh.triangles);
-    mesh.node_normals = compute_node_normals(mesh.points, mesh.triangles);
+    base_mesh.triangles = orient_triangles_outward(base_mesh.points, base_mesh.tetrahedrons, base_mesh.triangles);
+    base_mesh.node_normals = compute_node_normals(base_mesh.points, base_mesh.triangles);
 
     auto mesh_end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> mesh_duration = mesh_end - mesh_start;
@@ -835,21 +760,26 @@ int main(int argc, char* argv[]) {
             std::cerr << "Échec de lecture pour " << file_path << " (" << e.what() << "), ignoré.\n";
             continue;
         }
-
         std::cout << "\n---------------------------------------------\n";
         std::cout << "Traitement de : " << file_path << " (Iteration: " << iter << " | Time: " << current_time << ")...\n";
 
         // Garde-fou numérique : vérifie si le fichier d'aimantation lu est compatible avec la géométrie du maillage
-        if (mag.rows() != mesh.points.rows()) {
+        if (mag.rows() != base_mesh.points.rows()) {
             std::cerr << "Incohérence de taille de nœuds dans " << file_path << ", ignoré.\n";
             continue;
         }
 
+        std::cout << "Traitement (PN-Subdivision) de : " << file_path << " (Iter: " << iter << ")\n";
+        // --- GÉNÉRATION DU MAILLAGE FIN POUR CE PAS DE TEMPS ---
+        Eigen::MatrixXd fine_mag;
+        Mesh fine_mesh = subdivide_surface_pn(base_mesh, mag, fine_mag);
+        fine_mesh.node_normals = compute_node_normals(fine_mesh.points, fine_mesh.triangles);
+
         // --- ANALYSE VOLUME (Parcours exhaustif de tous les tétraèdres du domaine) ---
-        for (const auto& nodes_idx : mesh.tetrahedrons) {
+        for (const auto& nodes_idx : base_mesh.tetrahedrons) {
             Matrix34d t_coords, t_mag; 
             for(int i = 0; i < 4; ++i) {
-                t_coords.col(i) = mesh.points.row(nodes_idx[i]);
+                t_coords.col(i) = base_mesh.points.row(nodes_idx[i]);
                 t_mag.col(i) = mag.row(nodes_idx[i]);
             }
 
@@ -876,12 +806,12 @@ int main(int argc, char* argv[]) {
         }
 
         // --- ANALYSE SURFACE (Parcours de toutes les facettes triangulaires frontières) ---
-        for (const auto& nodes_idx : mesh.triangles) {
+        for (const auto& nodes_idx : fine_mesh.triangles) {
             Eigen::Matrix3d s_coords, s_mag, s_normals; 
             for(int i = 0; i < 3; ++i) {
-                s_coords.col(i) = mesh.points.row(nodes_idx[i]);
-                s_mag.col(i) = mag.row(nodes_idx[i]);
-		s_normals.col(i) = mesh.node_normals.row(nodes_idx[i]); 
+                s_coords.col(i) = fine_mesh.points.row(nodes_idx[i]);
+                s_mag.col(i) = fine_mag.row(nodes_idx[i]);
+		        s_normals.col(i) = fine_mesh.node_normals.row(nodes_idx[i]); 
              }
 
             auto res_surf = analyze_surface_singularity(iter, current_time, s_coords, s_mag, s_normals);
