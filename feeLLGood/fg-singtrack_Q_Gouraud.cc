@@ -39,6 +39,13 @@ struct Mesh {
     Eigen::MatrixXd node_normals;              // Normale lissée à chaque sommet
 };
 
+// Structure pour identifier une arête unique (Subdivision)
+struct Edge {
+    int v1, v2;                                                                                                                                         bool operator<(const Edge& other) const {
+        return std::tie(v1, v2) < std::tie(other.v1, other.v2);
+    }
+};
+
 // Structures de résultats complètes pour l'analyse topologique interne (Volume)
 struct BlochPointResult {
     int iter;                 // Numéro de l'itération temporelle issue du fichier .sol
@@ -370,6 +377,56 @@ Eigen::MatrixXd compute_node_normals(const Eigen::MatrixXd& points, const std::v
     }
     std::cout << "=> " << active_surface_nodes << " normales nodales de surface calculées et normalisées.\n";
     return node_normals;
+}
+
+// --- APPROCHE A : SUBDIVISION PN-TRIANGLE ET INTERPOLATION DE L'AIMANTATION ---
+Mesh subdivide_surface_pn(const Mesh& original_mesh, const Eigen::MatrixXd& original_mag, Eigen::MatrixXd& out_fine_mag) {
+    Mesh fine_mesh;
+    fine_mesh.points = original_mesh.points;
+    fine_mesh.tetrahedrons = original_mesh.tetrahedrons;
+
+    out_fine_mag = original_mag; // Initialisation de la matrice d'aimantation fine
+
+    std::map<Edge, int> midpoints_map;
+
+    auto get_or_create_pn_midpoint = [&](int iA, int iB) {
+        int v1 = std::min(iA, iB); int v2 = std::max(iA, iB);
+        Edge edge{v1, v2};
+        if (midpoints_map.find(edge) != midpoints_map.end()) return midpoints_map[edge];
+
+        Eigen::Vector3d P1 = original_mesh.points.row(v1), P2 = original_mesh.points.row(v2);
+        Eigen::Vector3d N1 = original_mesh.node_normals.row(v1), N2 = original_mesh.node_normals.row(v2);
+
+        // Correction Géométrique Géométrique PN-Triangle
+        double d1 = (P2 - P1).dot(N1); double d2 = (P1 - P2).dot(N2);
+        Eigen::Vector3d P_corrected = 0.5 * (P1 + P2) + 0.125 * (d1 * N1 + d2 * N2);
+
+        // --- INTERPOLATION PHYSIQUE DE L'AIMANTATION ---
+        Eigen::Vector3d M1 = original_mag.row(v1), M2 = original_mag.row(v2);
+        Eigen::Vector3d M_interpolated = (0.5 * (M1 + M2)).normalized(); // Normalisation stricte |m| = 1
+
+        int new_idx = fine_mesh.points.rows();
+        fine_mesh.points.conservativeResize(new_idx + 1, 3);
+        fine_mesh.points.row(new_idx) = P_corrected;
+
+        out_fine_mag.conservativeResize(new_idx + 1, 3);
+        out_fine_mag.row(new_idx) = M_interpolated;
+
+        midpoints_map[edge] = new_idx;
+        return new_idx;
+    };
+
+    for (const auto& tri : original_mesh.triangles) {
+        int m01 = get_or_create_pn_midpoint(tri[0], tri[1]);
+        int m12 = get_or_create_pn_midpoint(tri[1], tri[2]);
+        int m20 = get_or_create_pn_midpoint(tri[2], tri[0]);
+
+        fine_mesh.triangles.push_back(Eigen::Vector3i(tri[0], m01, m20));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m01, tri[1], m12));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m20, m12, tri[2]));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m01, m12, m20));
+    }
+    return fine_mesh;
 }
 
 // --- ANALYSE POINT DE BLOCH (VOLUME) ---
@@ -705,17 +762,17 @@ int main(int argc, char* argv[]) {
     // 3. CHARGEMENT ET CORRECTION DU MAILLAGE (UNE SEULE FOIS// Mesure du temps CPU hautement précise via la bibliothèque <chrono>
     auto mesh_start = std::chrono::high_resolution_clock::now();
     std::cout << "Chargement unique du maillage : " << msh_file << "...\n";
-    Mesh mesh;
+    Mesh base_mesh;
     try {
         // initial_mag.rows() fournit le nombre attendu de nœuds pour dimensionner la matrice de points
-        mesh = load_mesh_gmsh(msh_file, initial_mag.rows());
+        base_mesh = load_mesh_gmsh(msh_file, initial_mag.rows());
     } catch (const std::exception& e) {
         std::cerr << "Erreur de maillage : " << e.what() << "\n";
      return 1;
     }
     // Appel obligatoire de la fonction d'orientation pour corriger les normales de surface face au volume
-    mesh.triangles = orient_triangles_outward(mesh.points, mesh.tetrahedrons, mesh.triangles);
-    mesh.node_normals = compute_node_normals(mesh.points, mesh.triangles);
+    base_mesh.triangles = orient_triangles_outward(base_mesh.points, base_mesh.tetrahedrons, base_mesh.triangles);
+    base_mesh.node_normals = compute_node_normals(base_mesh.points, base_mesh.triangles);
 
     auto mesh_end = std::chrono::high_resolution_clock::now(); // <-- FIN CHRONO
     std::chrono::duration<double> mesh_duration = mesh_end - mesh_start;
@@ -741,17 +798,24 @@ int main(int argc, char* argv[]) {
         std::cout << "Traitement de : " << file_path << " (Iteration: " << iter << " | Time: " << current_time << ")...\n";
 
         // Garde-fou numérique : vérifie si le fir d'aimantation lu est compatible avec la géométrie du maillage chargé
-        if (mag.rows() != mesh.points.rows()) {
+        if (mag.rows() != base_mesh.points.rows()) {
             std::cerr << "Incohérence de taille de nœuds dans " << file_path << ", ignoré.\n";
             continue;
         }
 
+
+        std::cout << "Traitement (PN-Subdivision) de : " << file_path << " (Iter: " << iter << ")\n";
+        // --- GÉNÉRATION DU MAILLAGE FIN POUR CE PAS DE TEMPS ---
+        Eigen::MatrixXd fine_mag;
+        Mesh fine_mesh = subdivide_surface_pn(base_mesh, mag, fine_mag);
+        fine_mesh.node_normals = compute_node_normals(fine_mesh.points, fine_mesh.triangles);
+
         // --- ANALYSE VOLUME (Parcours exhaustif de tous les tétraèdres du domaine) ---
-        for (const auto& nodes_idx : mesh.tetrahedrons) {
+        for (const auto& nodes_idx : base_mesh.tetrahedrons) {
             Matrix34d t_coords, t_mag; 
             // Extraction locale des coordonnées et aimantations des  du tétraèdre courant
             for(int i = 0; i < 4; ++i) {
-                t_coords.col(i) = mesh.points.row(nodes_idx[i]);
+                t_coords.col(i) = base_mesh.points.row(nodes_idx[i]);
                 t_mag.col(i) = mag.row(nodes_idx[i]);
             }
 
@@ -780,15 +844,14 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // --- ANALYSE SURFACE (Parcours de toutes les facettes triangulaires frontières) ---
-        for (const auto& nodes_idx : mesh.triangles) {
-	    Eigen::Matrix3d s_coords, s_mag, s_normals;
-            // Extraction des données nodales locales pour les 3 sommets du triangle courant
+	// --- ANALYSE SURFACE (Parcours de toutes les facettes triangulaires frontières) ---
+        for (const auto& nodes_idx : fine_mesh.triangles) {
+            Eigen::Matrix3d s_coords, s_mag, s_normals;
             for(int i = 0; i < 3; ++i) {
-                s_coords.col(i) = mesh.points.row(nodes_idx[i]);
-                s_mag.col(i) = mag.row(nodes_idx[i]);
-		s_normals.col(i) = mesh.node_normals.row(nodes_idx[i]);
-            }
+                s_coords.col(i) = fine_mesh.points.row(nodes_idx[i]);
+                s_mag.col(i) = fine_mag.row(nodes_idx[i]);
+                s_normals.col(i) = fine_mesh.node_normals.row(nodes_idx[i]);
+             }
 
             auto res_surf = analyze_surface_singularity(iter, current_time, s_coords, s_mag, s_normals);
             if (res_surf) {
