@@ -609,6 +609,15 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
 
 #else
     // --- NOUVELLE MÉTHODE : DOUBLE PROJECTION (Plan tangent nodal puis Plan du triangle) ---
+    // Edgar propose de faire la projection en deux étapes :
+
+    // 1. D'abord, en chaque nœud de surface, on projette l'aimantation sur le
+    // plan tangent à la surface en ce nœud (plan perpendiculaire au vecteur normal)
+    // Ce sont les vecteurs magenta de la figure de Edgar
+
+    // 2. Ensuite, sur chaque facette, on projette ces vecteurs magenta sur le
+    // plan de la facette. Ce sont les vecteurs bleus de la figure
+
     Eigen::Vector3d m_t0 = Eigen::Vector3d::Zero();
     Eigen::Vector3d m_t1 = Eigen::Vector3d::Zero();
 
