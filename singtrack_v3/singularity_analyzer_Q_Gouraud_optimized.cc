@@ -913,8 +913,8 @@ int main(int argc, char* argv[]) {
                 auto res_bp = analyze_bloch_point(iter, current_time, t_coords, t_mag);
                 if (res_bp) {
                     #pragma omp critical(cout_log)
-                    std::printf(" -> [BP Volume] détecté à : [%.5f, %.5f, %.5f] nm (%s)\n", 
-                                res_bp->pos.x(), res_bp->pos.y(), res_bp->pos.z(), res_bp->type.c_str());
+                    std::printf("iter %d -> [BP Volume] détecté à : [%.5f, %.5f, %.5f] nm (%s)\n", 
+                                iter, res_bp->pos.x(), res_bp->pos.y(), res_bp->pos.z(), res_bp->type.c_str());
                     thread_bloch[fi].push_back(*res_bp);
                 }
             }
@@ -932,8 +932,8 @@ int main(int argc, char* argv[]) {
             auto res_surf = analyze_surface_singularity(iter, current_time, s_coords, s_mag, s_normals);
             if (res_surf) {
                 #pragma omp critical(cout_log)
-                std::printf(" -> [Singularité Surface] (%s) à : [%.5f, %.5f, %.5f] nm | Pol: %+.2f | Q_topo: %+.4f\n",
-                            res_surf->type.c_str(), res_surf->pos.x(), res_surf->pos.y(), res_surf->pos.z(), res_surf->polarity, res_surf->topological_charge);
+                std::printf("iter %d -> [Singularité Surface] (%s) à : [%.5f, %.5f, %.5f] nm | Pol: %+.2f | Q_topo: %+.4f\n",
+                            iter, res_surf->type.c_str(), res_surf->pos.x(), res_surf->pos.y(), res_surf->pos.z(), res_surf->polarity, res_surf->topological_charge);
                 thread_surf[fi].push_back(*res_surf);
             }
         }
