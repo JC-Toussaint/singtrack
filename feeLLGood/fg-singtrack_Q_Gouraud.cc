@@ -507,10 +507,38 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
     Eigen::Vector3d t0 = v1.normalized(); // Premier vecteur tangent unitaire aligné sur l'arête 1
     Eigen::Vector3d t1 = n.cross(t0);    // Second vecteur tangent unitaire orthogonal à t0 dans le plan
 
+    #ifdef INPLANE
     // Projection du champ tridimensionnel d'aimantation des 3 nœuds sur ce repère local (t0, t1, n)
-    // ns_mag.transpose() * t0 effectue le produit scalaire pour les 3 nœuds d'un coup.
     Eigen::Vector3d m_t0 = ns_mag.transpose() * t0; // Composantes tangentielles m_t0 au nœud 0, 1, 2
     Eigen::Vector3d m_t1 = ns_mag.transpose() * t1; // Composantes tangentielles m_t1 au nœud 0, 1, 2
+
+    #else
+    // --- NOUVELLE MÉTHODE : DOUBLE PROJECTION (Plan tangent nodal puis Plan du triangle) ---
+    // Edgar propose de faire la projection en deux étapes :
+
+    // 1. D'abord, en chaque nœud de surface, on projette l'aimantation sur le
+    // plan tangent à la surface en ce nœud (plan perpendiculaire au vecteur normal)
+    // Ce sont les vecteurs magenta de la figure de Edgar
+
+    // 2. Ensuite, sur chaque facette, on projette ces vecteurs magenta sur le
+    // plan de la facette. Ce sont les vecteurs bleus de la figure
+
+    Eigen::Vector3d m_t0 = Eigen::Vector3d::Zero();
+    Eigen::Vector3d m_t1 = Eigen::Vector3d::Zero();
+
+    for (int i = 0; i < 3; ++i) {
+        Eigen::Vector3d m_i = ns_mag.col(i);
+        Eigen::Vector3d n_node = ns_normals.col(i);
+
+        // 1. Projection de m sur le plan tangent local du noeud i (m_magenta)
+        Eigen::Vector3d m_magenta = m_i - m_i.dot(n_node) * n_node;
+
+        // 2. Projection de m_magenta sur la base du triangle (t0, t1)
+        m_t0[i] = m_magenta.dot(t0);
+        m_t1[i] = m_magenta.dot(t1);
+    }
+    #endif
+
     Eigen::Vector3d m_n  = ns_mag.transpose() * n;  // Composantes normales m_n au nœud 0, 1, 2
 
     // Projection des coordonnées 3D réelles dans le plan 2D projeté pour l'interpolation spatiale
@@ -529,7 +557,7 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
     // Résolution 2D pour trouver les facteurs de pondération (coordonnées locales dans le triangle)
     Eigen::Vector2d vec_local = -1.0 * A_surf.colPivHouseholderQr().solve(Eigen::Vector2d(m_t0[0], m_t1[0]));
 
-    // Le point singulier de surface se trouve-t-il dans les limites physiques du triangle ?
+    // Le point singulier de surface seuve-t-il dans les limites physiques du triangle ?
     // Condition géométrique standard en 2D : u > 0, v > 0 ET u + v < 1.
     if (vec_local[0] > 0 && vec_local[1] > 0 && (vec_local[0] + vec_local[1] < 1)) {
         // Reconstruction tridimensionnelle de la position exacte de la singularité de surface
@@ -537,12 +565,12 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
        
        	// --- CONTRIBUTION : INTERPOLATION DE LA NORMALE (Gouraud/Phong Shading) ---
         Eigen::Vector3d n_interpolated = ns_normals.col(0) + vec_local[0] * (ns_normals.col(1) - ns_normals.col(0))
-                                                           + vec_local[1] * (ns_normals.col(2) - ns_normals.col(0));
+                                                          + vec_local[1] * (ns_normals.col(2) - ns_normals.col(0));
         n_interpolated.normalize();
 
         // Interpolation de l'aimantation 3D cartésienne complète au point exact du défaut
         Eigen::Vector3d mag_at_defect = ns_mag.col(0) + vec_local[0] * (ns_mag.col(1) - ns_mag.col(0)) + vec_local[1] * (ns_mag.col(2) - ns_mag.col(0));
-        // La polarité p_val est la projection du champ total sur la normale externe unitaire
+        // Lolarité p_val est la projection du champ total sur la normale externe unitaire
         double p_val = mag_at_defect.dot(n_interpolated);
 
         // Définition de la Polarité (+1 ou -1) : indique si l'aimantation sort de la surface ou y plonge au cœur du défaut
@@ -559,9 +587,7 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
 
         // Calcul des gradients bidimensionnels des composantes tangentielles de l'aimantation
         Eigen::Vector3d coeff_t0 = inv_M * m_t0; // Dérivées de m_t0 par rapport au repère plan
-        Eigen::Vector3d coeff_t1 = inv_M * m_t1; // Dérivées de m_t1 par rapport au repère plan
-
-        // Constitution du Jacobien réduit de surface (2 lignes, 2 colonnes)
+        Eigen::Vector3d coeff_t1 = inv_M * m_t1; // Dérivées de m_t1 par rapport au repère         // Constitution du Jacobien réduit de surface (2 lignes, 2 colonnes)
         Eigen::Matrix2d jac_2d;
         jac_2d(0, 0) = coeff_t0[1]; jac_2d(0, 1) = coeff_t0[2]; // [\partial m_t0 / \partial t0,  \partial m_t0 / \partial t1]
         jac_2d(1, 0) = coeff_t1[1]; jac_2d(1, 1) = coeff_t1[2]; // [\partial m_t1 / \partial t0,  \partial m_t1 / \partial t1]
@@ -578,14 +604,14 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
         bool is_complex = (std::abs(eigvals[0].imag()) > TOL || std::abs(eigvals[1].imag()) > TOL);
 
         if (is_complex) {
-            surf_type = (eigvals[0].real() > 0) ? "spiral_source" : "spiral_sink";
+           surf_type = (eigvals[0].real() > 0) ? "spiral_source" : "spiral_sink";
         } else {
             // Valeurs propres réelles : si elles sont de signes opposés, c'est un col (Saddle / Anti-vortex de surface)
             if ((eigvals[0].real() > 0 && eigvals[1].real() < 0) || (eigvals[0].real() < 0 && eigvals[1].real() > 0)) {
                 surf_type = "saddle";
             } else {
                 // Sinon, c'est un nœud divergent (Source) ou convergent (Sink)
-                surf_type = (eigvals[0].real() > 0) ? "source" : "sink";
+		surf_type = (eigvals[0].real() > 0) ? "source" : "sink";
             }
         }
 
@@ -600,14 +626,14 @@ std::unique_ptr<SurfaceSingularityResult> analyze_surface_singularity(int curren
         // Ici, on approxime la densité par le produit mixte au centre géométrique du triangle pour l'intégration.
         Eigen::Vector3d m_center = ns_mag.rowwise().mean(); // Moyenne nodale pour stabiliser l'évaluation du flux
         
-        // Produit mixte : m \cdot (\partial m/\partial t0 \times \partial m/\partial t1)
+ // Produit mixte : m \cdot (\partial m/\partial t0 \times \partial m/\partial t1)
         double charge_density = m_center.dot(dm_dt0.cross(dm_dt1));
         
         // L'intégrale de surface pour un élément de premier ordre (linéaire) revient à multiplier 
         // cette densité par l'aire du triangle, normalisée par 4\pi.
         double topological_charge = (charge_density * triangle_area) / (4.0 * M_PI);
 
-        return std::make_unique<SurfaceSingularityResult>(SurfaceSingularityResult{
+	return std::make_unique<SurfaceSingularityResult>(SurfaceSingularityResult{
             current_iter, current_time, sol_cartesian, curl_n, eigvals, surf_type, polarity, topological_charge
         });
     }
@@ -633,7 +659,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Parcours du système de fichiers via la bibliothèque standard <filesystem> de C++17
+    // Parcours du système de fichiers via la biblioue standard <filesystem> de C++17
     for (const auto& entry : fs::directory_iterator(DIRECTORY_PATH)) {
         std::string filename = entry.path().filename().string();
         
@@ -642,7 +668,7 @@ int main(int argc, char* argv[]) {
             try {
                 // Regex configurée pour intercepter le motif de nommage, ex: "magn_iter450.sol"
                 // (\d+) capture un ou plusieurs chiffres consécutifs formant l'index d'itération
-                std::regex re(R"(.*_iter(\d+)\.sol)");
+		std::regex re(R"(.*_iter(\d+)\.sol)");
                 std::smatch match;
                 int num = -1;
                 if (std::regex_match(filename, match, re)) {
@@ -651,7 +677,7 @@ int main(int argc, char* argv[]) {
                 sol_files.push_back({num, entry.path().string()});
             } catch (...) {
                 // Gestion de secours si le format du nom dévie mais possède la bonne extension
-                sol_files.push_back({0, entry.path().string()});
+		sol_files.push_back({0, entry.path().string()});
             }
         }
     }
@@ -665,7 +691,7 @@ int main(int argc, char* argv[]) {
     std::sort(sol_files.begin(), sol_files.end());
     std::cout << sol_files.size() << " fichiers solutions trouvés et triés.\n";
 
-    // 2. Pré-chargement de la première solution pour connaître la taille attendue du maillage.
+    // 2. Pré-chargement de la première solution pour connla taille attendue du maillage.
     // Permet une allocation mémoire optimisée et une barrière de contrôle pour valider la cohérence avec le fichier Gmsh.
     Eigen::MatrixXd initial_mag;
     double dummy_time = 0.0;
@@ -676,8 +702,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 3. CHARGEMENT ET CORRECTION DU MAILLAGE (UNE SEULE FOIS)
-    // Mesure du temps CPU hautement précise via la bibliothèque <chrono>
+    // 3. CHARGEMENT ET CORRECTION DU MAILLAGE (UNE SEULE FOIS// Mesure du temps CPU hautement précise via la bibliothèque <chrono>
     auto mesh_start = std::chrono::high_resolution_clock::now();
     std::cout << "Chargement unique du maillage : " << msh_file << "...\n";
     Mesh mesh;
@@ -686,7 +711,7 @@ int main(int argc, char* argv[]) {
         mesh = load_mesh_gmsh(msh_file, initial_mag.rows());
     } catch (const std::exception& e) {
         std::cerr << "Erreur de maillage : " << e.what() << "\n";
-        return 1;
+     return 1;
     }
     // Appel obligatoire de la fonction d'orientation pour corriger les normales de surface face au volume
     mesh.triangles = orient_triangles_outward(mesh.points, mesh.tetrahedrons, mesh.triangles);
@@ -715,7 +740,7 @@ int main(int argc, char* argv[]) {
         std::cout << "\n---------------------------------------------\n";
         std::cout << "Traitement de : " << file_path << " (Iteration: " << iter << " | Time: " << current_time << ")...\n";
 
-        // Garde-fou numérique : vérifie si le fichier d'aimantation lu est compatible avec la géométrie du maillage chargé
+        // Garde-fou numérique : vérifie si le fir d'aimantation lu est compatible avec la géométrie du maillage chargé
         if (mag.rows() != mesh.points.rows()) {
             std::cerr << "Incohérence de taille de nœuds dans " << file_path << ", ignoré.\n";
             continue;
@@ -724,7 +749,7 @@ int main(int argc, char* argv[]) {
         // --- ANALYSE VOLUME (Parcours exhaustif de tous les tétraèdres du domaine) ---
         for (const auto& nodes_idx : mesh.tetrahedrons) {
             Matrix34d t_coords, t_mag; 
-            // Extraction locale des coordonnées et aimantations des 4 sommets du tétraèdre courant
+            // Extraction locale des coordonnées et aimantations des  du tétraèdre courant
             for(int i = 0; i < 4; ++i) {
                 t_coords.col(i) = mesh.points.row(nodes_idx[i]);
                 t_mag.col(i) = mag.row(nodes_idx[i]);
@@ -732,7 +757,7 @@ int main(int argc, char* argv[]) {
 
             // Test de pré-filtrage topologique ultra-rapide (sign_check) utilisant les expressions Lambdas de C++.
             // Un point de Bloch (\vec{m}=\vec{0}) ne peut exister dans un tétraèdre QUE si chaque composante (mx, my, mz) 
-            // change de signe au moins une fois parmi les 4 nœuds de l'élément. 
+            // change de signe au moins une fois parmi les 4 nœuds dement. 
             // Si une composante reste entièrement positive ou entièrement négative, l'aimantation ne peut pas s'annuler à l'intérieur.
             auto sign_check = [](const Matrix34d& m, int axis) {
                 bool has_pos = false, has_neg = false;
@@ -740,7 +765,7 @@ int main(int argc, char* argv[]) {
                     if(m(axis, i) > 0) has_pos = true;
                     if(m(axis, i) < 0) has_neg = true;
                 }
-                // CORRECTION : Ligne de retour complète rétablie pour éviter l'erreur de scope lambda
+                // CORRECTION : Ligne de retour complète rétablie pour l'erreur de scope lambda
                 return has_pos && has_neg; // Vrai si croisement du zéro
             };
 
@@ -748,7 +773,7 @@ int main(int argc, char* argv[]) {
             if (sign_check(t_mag, 0) && sign_check(t_mag, 1) && sign_check(t_mag, 2)) {
                 auto res_bp = analyze_bloch_point(iter, current_time, t_coords, t_mag);
                 if (res_bp) {
-                    std::printf(" -> [BP Volume] détecté à : [%.5f, %.5f, %.5f] nm (%s)\n", 
+                    std::printf(" -> [BP Vol détecté à : [%.5f, %.5f, %.5f] nm (%s)\n", 
                                 res_bp->pos.x(), res_bp->pos.y(), res_bp->pos.z(), res_bp->type.c_str());
                     global_bloch_points.push_back(*res_bp); // Déréférencement du pointeur pour stockage par copie dans le tableau global
                 }
@@ -757,7 +782,7 @@ int main(int argc, char* argv[]) {
 
         // --- ANALYSE SURFACE (Parcours de toutes les facettes triangulaires frontières) ---
         for (const auto& nodes_idx : mesh.triangles) {
-            Eigen::Matrix3d s_coords, s_mag, s_normals; 
+	    Eigen::Matrix3d s_coords, s_mag, s_normals;
             // Extraction des données nodales locales pour les 3 sommets du triangle courant
             for(int i = 0; i < 3; ++i) {
                 s_coords.col(i) = mesh.points.row(nodes_idx[i]);
@@ -776,7 +801,7 @@ int main(int argc, char* argv[]) {
 
     auto sol_end = std::chrono::high_resolution_clock::now(); 
     std::chrono::duration<double> sol_duration = sol_end - sol_start;
-    std::cout << "\n=> Temps total de traitement de tous les fichiers .sol : "
+    std::cout << "\n=emps total de traitement de tous les fichiers .sol : "
               << sol_duration.count() << " secondes.\n";
 
     // 5. SAUVEGARDE GLOBALE COMPLETE (Génération des fichiers de rapports tabulés structurés)
@@ -785,13 +810,13 @@ int main(int argc, char* argv[]) {
     // Exportation du fichier texte compilant tous les points de Bloch (Volume) trouvés au cours du temps
     std::ofstream f_vol("all_volume_bloch_points.txt");
     if (f_vol.is_open()) {
-        // Écriture d'une entête alignée de manière rigoureuse avec les manipulateurs de flux (std::setw)
+  // Écriture d'une entête alignée de manière rigoureuse avec les manipulateurs de flux (std::setw)
         f_vol << std::left  << std::setw(8)  << "#iter"
               << std::setw(15) << "time"
               << std::right << std::setw(10) << "x" << std::setw(10) << "y" << std::setw(10) << "z"
               << std::setw(10) << "curl_x" << std::setw(10) << "curl_y" << std::setw(10) << "curl_z"
               << std::setw(12) << "eig0_re" << std::setw(12) << "eig0_im"
-              << std::setw(12) << "eig1_re" << std::setw(12) << "eig1_im"
+              << std::setw(12) << "eig" << std::setw(12) << "eig1_im"
               << std::setw(12) << "eig2_re" << std::setw(12) << "eig2_im"
               << "  type\n";
 
@@ -799,7 +824,7 @@ int main(int argc, char* argv[]) {
             f_vol << std::left  << std::setw(8)  << bp.iter
                   << std::scientific << std::setprecision(6) << std::setw(15) << bp.time // Temps au format scientifique
                   << std::right << std::fixed << std::setprecision(4)                     // Coordonnées et scalaires au format fixe
-                  << std::setw(10) << bp.pos.x()  << std::setw(10) << bp.pos.y()  << std::setw(10) << bp.pos.z()
+                 << std::setw(10) << bp.pos.x()  << std::setw(10) << bp.pos.y()  << std::setw(10) << bp.pos.z()
                   << std::setw(10) << bp.curl.x() << std::setw(10) << bp.curl.y() << std::setw(10) << bp.curl.z()
                   << std::setw(12) << bp.eigvals[0].real() << std::setw(12) << bp.eigvals[0].imag()
                   << std::setw(12) << bp.eigvals[1].real() << std::setw(12) << bp.eigvals[1].imag()
@@ -814,7 +839,7 @@ int main(int argc, char* argv[]) {
         f_surf << std::left  << std::setw(8)  << "#iter"
                << std::setw(15) << "time"
                << std::right << std::setw(10) << "x" << std::setw(10) << "y" << std::setw(10) << "z"
-               << std::setw(12) << "curl_n" 
+             << std::setw(12) << "curl_n" 
                << std::setw(10) << "polarity"
                << std::setw(12) << "charge_Q"
                << std::setw(12) << "eig0_re" << std::setw(12) << "eig0_im"
