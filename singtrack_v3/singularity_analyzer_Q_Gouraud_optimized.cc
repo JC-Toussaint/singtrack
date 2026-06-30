@@ -346,14 +346,13 @@ std::vector<Eigen::Vector3i> orient_triangles_outward(const Eigen::MatrixXd& poi
 
 // --- CONTRIBUTION : CALCUL DES NORMALES AUX SOMMETS ---
 Eigen::MatrixXd compute_node_normals(const Eigen::MatrixXd& points, const std::vector<Eigen::Vector3i>& triangles) {
-    std::cout << "Calcul et lissage des normales aux sommets de surface..." << std::endl;
+    // OPTIM : réduction OpenMP sur les normales nodales.
+    // Chaque thread accumule dans une copie locale, puis on somme toutes les copies à la fin.
+    // Cela évite les races conditions sans mutex, au prix d'une allocation mémoire supplémentaire temporaire.
     const int Npts = static_cast<int>(points.rows());
     const int Ntri = static_cast<int>(triangles.size());
     Eigen::MatrixXd node_normals = Eigen::MatrixXd::Zero(Npts, 3);
 
-    // OPTIM : réduction OpenMP sur les normales nodales.
-    // Chaque thread accumule dans une copie locale, puis on somme toutes les copies à la fin.
-    // Cela évite les races conditions sans mutex, au prix d'une allocation mémoire supplémentaire temporaire.
     #ifdef _OPENMP
     const int nthreads = omp_get_max_threads();
     std::vector<Eigen::MatrixXd> local_normals(nthreads, Eigen::MatrixXd::Zero(Npts, 3));
@@ -390,7 +389,6 @@ Eigen::MatrixXd compute_node_normals(const Eigen::MatrixXd& points, const std::v
             active_surface_nodes++;
         }
     }
-    std::cout << "=> " << active_surface_nodes << " normales nodales de surface calculées et normalisées.\n";
     return node_normals;
 }
 
@@ -839,21 +837,28 @@ int main(int argc, char* argv[]) {
             std::cerr << "Échec de lecture pour " << file_path << " (" << e.what() << "), ignoré.\n";
             continue;
         }
+        
+        // [MODIF SILENCIEUSE] Suppression de l'affichage du début de traitement de fichier pour éviter l'entrelacement
+        /*
         #pragma omp critical(cout_log)
         {
             std::cout << "\n---------------------------------------------\n";
             std::cout << "Traitement de : " << file_path << " (Iteration: " << iter << " | Time: " << current_time << ")...\n";
         }
+        */
 
-        // Garde-fou numérique : vérifie si le fichier d'aimantation lu est compatible avec la géométrie du maillage
+        // Garde-fou numérique : verifies si le fichier d'aimantation lu est compatible avec la géométrie du maillage
         if (mag.rows() != base_mesh.points.rows()) {
             #pragma omp critical(cerr_log)
             std::cerr << "Incohérence de taille de nœuds dans " << file_path << ", ignoré.\n";
             continue;
         }
 
+        // [MODIF SILENCIEUSE] Suppression de l'affichage PN-Subdivision
+        /*
         #pragma omp critical(cout_log)
         std::cout << "Traitement (PN-Subdivision) de : " << file_path << " (Iter: " << iter << ")\n";
+        */
 
         // --- GÉNÉRATION DU MAILLAGE FIN POUR CE PAS DE TEMPS ---
         // Note : subdivide_surface_pn est thread-safe (pas de variable globale modifiée)
@@ -866,7 +871,7 @@ int main(int argc, char* argv[]) {
         #pragma omp critical(fine_mesh_export_zone)
         {
             if (!fine_mesh_exported) {
-                std::cout << "Exportation géométrique du maillage affine fine_mesh dans 'fine_mesh.out'...\n";
+                // [MODIF SILENCIEUSE] L'exportation reste active mais se fait sans bavardage console inutile
                 std::ofstream f_fine("fine_mesh.out");
                 if (f_fine.is_open()) {
                     f_fine << std::left << std::setw(8) << "#id_node" 
@@ -881,7 +886,6 @@ int main(int argc, char* argv[]) {
                                << std::setw(15) << fine_mesh.points(i, 2) << "\n";
                     }
                     f_fine.close();
-                    std::cout << "=> Fin de l'export (" << fine_mesh.points.rows() << " noeuds enregistres).\n";
                 } else {
                     std::cerr << "Erreur : Impossible de creer le fichier fine_mesh.out\n";
                 }
@@ -912,9 +916,12 @@ int main(int argc, char* argv[]) {
             if (sign_check(t_mag, 0) && sign_check(t_mag, 1) && sign_check(t_mag, 2)) {
                 auto res_bp = analyze_bloch_point(iter, current_time, t_coords, t_mag);
                 if (res_bp) {
+                    // [MODIF SILENCIEUSE] Suppression du log de détection immédiate d'un BP volume
+                    /*
                     #pragma omp critical(cout_log)
                     std::printf("iter %d -> [BP Volume] détecté à : [%.5f, %.5f, %.5f] nm (%s)\n", 
                                 iter, res_bp->pos.x(), res_bp->pos.y(), res_bp->pos.z(), res_bp->type.c_str());
+                    */
                     thread_bloch[fi].push_back(*res_bp);
                 }
             }
@@ -931,9 +938,12 @@ int main(int argc, char* argv[]) {
 
             auto res_surf = analyze_surface_singularity(iter, current_time, s_coords, s_mag, s_normals);
             if (res_surf) {
+                // [MODIF SILENCIEUSE] Suppression du log de détection immédiate d'une singularité de surface
+                /*
                 #pragma omp critical(cout_log)
                 std::printf("iter %d -> [Singularité Surface] (%s) à : [%.5f, %.5f, %.5f] nm | Pol: %+.2f | Q_topo: %+.4f\n",
                             iter, res_surf->type.c_str(), res_surf->pos.x(), res_surf->pos.y(), res_surf->pos.z(), res_surf->polarity, res_surf->topological_charge);
+                */
                 thread_surf[fi].push_back(*res_surf);
             }
         }
@@ -947,8 +957,6 @@ int main(int argc, char* argv[]) {
 
     auto sol_end = std::chrono::high_resolution_clock::now(); 
     std::chrono::duration<double> sol_duration = sol_end - sol_start;
-    std::cout << "\n=> Temps total de traitement de tous les fichiers .sol : "
-              << sol_duration.count() << " secondes.\n";
 
     // 5. SAUVEGARDE GLOBALE COMPLÈTE (Génération des fichiers de rapports tabulés structurés)
     std::cout << "\n---------------------------------------------\nExécution de l'export final...\n";
@@ -1012,9 +1020,10 @@ int main(int argc, char* argv[]) {
     #ifdef _OPENMP
     std::cout << "Threads OpenMP utilisés             : " << omp_get_max_threads() << std::endl;
     #endif
-    std::cout << "Lecture & correction maillage : " << mesh_duration.count() << " s" << std::endl;
-    std::cout << "Traitement des fichiers .sol   : " << sol_duration.count() << " s" << std::endl;
-    std::cout << "Temps calcul total d'analyse  : " << (mesh_duration.count() + sol_duration.count()) << " s" << std::endl;
+    std::cout << "Fichiers solutions traités          : " << N_sol << std::endl; // Indication demandée
+    std::cout << "Lecture & correction maillage       : " << mesh_duration.count() << " s" << std::endl;
+    std::cout << "Traitement des fichiers .sol        : " << sol_duration.count() << " s" << std::endl;
+    std::cout << "Temps calcul total d'analyse        : " << (mesh_duration.count() + sol_duration.count()) << " s" << std::endl;
     std::cout << "=====================================\n" << std::endl;
     return 0;
 }
