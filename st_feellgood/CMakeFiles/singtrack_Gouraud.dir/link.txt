@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/singtrack_Gouraud.dir/singtrack_Gouraud.cc.o -o singtrack_Gouraud  /usr/lib/x86_64-linux-gnu/libgmsh.so /usr/lib/gcc/x86_64-linux-gnu/13/libgomp.so /usr/lib/x86_64-linux-gnu/libpthread.a 

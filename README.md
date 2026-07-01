@@ -41,7 +41,5 @@ Pour compiler et exécuter ce projet, vous devez disposer des éléments suivant
 Voici un exemple de configuration standard en ligne de commande avec CMake :
 
 ```bash
-mkdir build
-cd build
-cmake ..
+cmake .
 make
