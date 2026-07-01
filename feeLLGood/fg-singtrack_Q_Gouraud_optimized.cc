@@ -72,64 +72,73 @@ struct SurfaceSingularityResult {
     double topological_charge; // Charge topologique discrète locale Q_local (Berg-Lüscher) calculée sur la facette triangulaire
 };
 
-// --- FONCTION 1 : LECTURE D'UN FICHIER SOLUTION ---
+// --- FONCTION 1 : LECTURE D'UN FICHIER SOLUTION (ADAPTÉE POUR FEELLGOOD & SÉCURISÉE) ---
 // Charge le champ d'aimantation normalisé \vec{m}(x,y,z) associé à chaque nœud du maillage pour un instant donné.
 Eigen::MatrixXd load_magnetization(const std::string& sol_filename, double& out_time) {
     std::ifstream sol_file(sol_filename);
     if (!sol_file.is_open()) throw std::runtime_error("Fichier SOL manquant : " + sol_filename);
     
     std::string line;
-    // Lire la première ligne pour extraire le temps (ex: #time :   +7.3222568275e-04)
-    if (!std::getline(sol_file, line)) {
-        throw std::runtime_error("Fichier SOL vide ou invalide : " + sol_filename);
-    }
-
-    // Extraction de la valeur numérique du temps après le délimiteur "#time :"
-    size_t pos_colon = line.find(':');
-    if (pos_colon != std::string::npos) {
-        std::string time_str = line.substr(pos_colon + 1);
-        try {
-            out_time = std::stod(time_str); // Conversion de la chaîne de caractères (notation scientifique souvent) en double précision
-        } catch (...) {
-            out_time = 0.0;
-            std::cerr << "Attention : Impossible de parser la valeur de temps dans " << sol_filename << ". Fixé à 0.0.\n";
-        }
-    } else {
-        out_time = 0.0;
-        std::cerr << "Attention : En-tête de temps mal formé dans " << sol_filename << ". Fixé à 0.0.\n";
-    }
-
-    // OPTIM : réservation a priori pour éviter les réallocations répétées du vecteur de magnétisation.
+    out_time = 0.0;
+    bool time_found = false;
     std::vector<Eigen::Vector3d> mag_list;
-    mag_list.reserve(50000); // Estimation raisonnable ; le vecteur se redimensionne si nécessaire
-    
-    // Parcours ligne par ligne du reste du fichier contenant les données nodales
-    while (std::getline(sol_file, line)) {
-        if (line.empty() || line[0] == '#') continue; // Sauter les lignes vides ou les commentaires additionnels
-        
-        std::stringstream ss(line);
-        double cols[7];
-        int col_idx = 0;
 
-        // OPTIM : lecture directe en double (évite la création de std::string intermédiaires via stod(val))
-        while (col_idx < 7 && ss >> cols[col_idx]) ++col_idx;
-        
-        // Structure standard d'un fichier sol : les premières colonnes portent généralement sur les coordonnées de nœuds,
-        // les indices, ou d'autres champs. Les colonnes 5, 6 et 7 portent classiquement sur mx, my, mz.
-        if (col_idx < 7) {
-            throw std::runtime_error("Ligne incomplète dans " + sol_filename + " (Moins de 7 colonnes trouvées).");
+    // Parcours ligne par ligne du fichier contenant les en-têtes puis les données nodales
+    while (std::getline(sol_file, line)) {
+        if (line.empty()) continue;
+
+        // Traitement des lignes de commentaires / en-têtes (commençant par '#')
+        if (line[0] == '#') {
+            // CORRECTION STRUCTURELLE : Recherche stricte en début de ligne de "## time:"
+            // Évite de capturer par erreur la ligne précédente "## real-world time:"
+            if (!time_found && line.rfind("## time:", 0) == 0) {
+                size_t pos_colon = line.find(':');
+                if (pos_colon != std::string::npos) {
+                    try {
+                        // Extraction et conversion de la notation scientifique en réel double précision
+                        out_time = std::stod(line.substr(pos_colon + 1));
+                        time_found = true;
+                    } catch (...) {
+                        std::cerr << "Attention : Impossible de parser la valeur de temps dans " << sol_filename << ". Fixé à 0.0.\n";
+                    }
+                }
+            }
+            continue; // Passer à la ligne suivante (c'est un en-tête)
         }
         
-        // Récupération des composantes du vecteur d'aimantation unitaire (colonnes 5, 6 et 7 -> indices base 0 : 4, 5, 6)
-        mag_list.emplace_back(cols[4], cols[5], cols[6]);
+        // Lecture des données numériques nodales
+        std::stringstream ss(line);
+        double val;
+        std::vector<double> columns;
+        
+        // Extraction par jetons de toutes les colonnes numériques séparées par des espaces/tabulations
+        while (ss >> val) {
+            columns.push_back(val);
+        }
+        
+        // Format feeLLGood : idx(colonne 0) mx(colonne 1) my(colonne 2) mz(colonne 3) ...
+        // Sécurité : On s'assure d'avoir au moins les 4 colonnes nécessaires.
+        if (columns.size() < 4) {
+            throw std::runtime_error("Ligne incomplète ou mal formée dans " + sol_filename + " (Moins de 4 colonnes trouvées).");
+        }
+        
+        // Récupération des composantes du vecteur d'aimantation (colonnes 1, 2 et 3)
+        double mx = columns[1];
+        double my = columns[2];
+        double mz = columns[3];
+        
+        mag_list.push_back(Eigen::Vector3d(mx, my, mz));
     }
     sol_file.close();
 
+    if (!time_found) {
+        std::cerr << "Attention : En-tête '## time:' absent dans " << sol_filename << ". Fixé à 0.0.\n";
+    }
+
     // Allocation d'une matrice Eigen finale à la taille exacte pour des performances accrues lors des accès ultérieurs.
     // Chaque ligne de cette matrice correspond à l'aimantation au nœud i du maillage.
-    const int N = static_cast<int>(mag_list.size());
-    Eigen::MatrixXd mag(N, 3);
-    for (int i = 0; i < N; ++i) {
+    Eigen::MatrixXd mag(mag_list.size(), 3);
+    for (size_t i = 0; i < mag_list.size(); ++i) {
         mag.row(i) = mag_list[i];
     }
     return mag;
@@ -390,6 +399,74 @@ Eigen::MatrixXd compute_node_normals(const Eigen::MatrixXd& points, const std::v
         }
     }
     return node_normals;
+}
+
+// --- APPROCHE A : SUBDIVISION PN-TRIANGLE ET INTERPOLATION DE L'AIMANTATION ---
+Mesh subdivide_surface_pn(const Mesh& original_mesh, const Eigen::MatrixXd& original_mag, Eigen::MatrixXd& out_fine_mag) {
+    Mesh fine_mesh;
+    fine_mesh.points = original_mesh.points;
+    fine_mesh.tetrahedrons = original_mesh.tetrahedrons; 
+
+    out_fine_mag = original_mag; // Initialisation de la matrice d'aimantation fine
+
+    // OPTIM : remplacement de std::map<Edge,int> (O(log N) par opération) par un std::unordered_map
+    // avec une clé entière encodant les deux indices (v1 << 32 | v2) pour des lookups O(1).
+    // Le nombre de milieux d'arêtes est au plus 3/2 * N_triangles, on pré-alloue en conséquence.
+    auto edge_key = [](int v1, int v2) -> int64_t { return (static_cast<int64_t>(v1) << 32) | static_cast<uint32_t>(v2); };
+    std::unordered_map<int64_t, int> midpoints_map;
+    //midpoints_map.reserve(original_mesh.triangles.size() * 3 / 2 + 16);
+    midpoints_map.reserve(original_mesh.triangles.size() * 3);
+
+    // OPTIM : pré-allocation des nouvelles lignes points/aimantation pour éviter les conservativeResize répétés.
+    // Chaque triangle peut créer au plus 3 nouveaux midpoints (arêtes non partagées).
+    const int N_orig = static_cast<int>(original_mesh.points.rows());
+    //const int N_new_max = N_orig + static_cast<int>(original_mesh.triangles.size()) * 3 / 2 + 16;
+    const int N_new_max = N_orig + static_cast<int>(original_mesh.triangles.size()) * 3;
+    fine_mesh.points.conservativeResize(N_new_max, 3);
+    out_fine_mag.conservativeResize(N_new_max, 3);
+    int next_idx = N_orig; // Prochain index libre dans les matrices pré-allouées
+
+    auto get_or_create_pn_midpoint = [&](int iA, int iB) {
+        int v1 = std::min(iA, iB); int v2 = std::max(iA, iB);
+        int64_t key = edge_key(v1, v2);
+        auto it = midpoints_map.find(key);
+        if (it != midpoints_map.end()) return it->second;
+
+        Eigen::Vector3d P1 = original_mesh.points.row(v1), P2 = original_mesh.points.row(v2);
+        Eigen::Vector3d N1 = original_mesh.node_normals.row(v1), N2 = original_mesh.node_normals.row(v2);
+
+        // Correction Géométrique PN-Triangle
+        double d1 = (P2 - P1).dot(N1); double d2 = (P1 - P2).dot(N2);
+        Eigen::Vector3d P_corrected = 0.5 * (P1 + P2) + 0.125 * (d1 * N1 + d2 * N2);
+
+        // --- INTERPOLATION PHYSIQUE DE L'AIMANTATION ---
+        Eigen::Vector3d M1 = original_mag.row(v1), M2 = original_mag.row(v2);
+        Eigen::Vector3d M_interpolated = (0.5 * (M1 + M2)).normalized(); // Normalisation stricte |m| = 1
+
+        // OPTIM : écriture directe dans les lignes pré-allouées (pas de realloc)
+        fine_mesh.points.row(next_idx) = P_corrected;
+        out_fine_mag.row(next_idx) = M_interpolated;
+
+        midpoints_map[key] = next_idx;
+        return next_idx++;
+    };
+
+    fine_mesh.triangles.reserve(original_mesh.triangles.size() * 4); // Subdivision 1->4
+    for (const auto& tri : original_mesh.triangles) {
+        int m01 = get_or_create_pn_midpoint(tri[0], tri[1]);
+        int m12 = get_or_create_pn_midpoint(tri[1], tri[2]);
+        int m20 = get_or_create_pn_midpoint(tri[2], tri[0]);
+
+        fine_mesh.triangles.push_back(Eigen::Vector3i(tri[0], m01, m20));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m01, tri[1], m12));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m20, m12, tri[2]));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m01, m12, m20));
+    }
+
+    // Troncature des matrices aux tailles réelles effectivement utilisées
+    fine_mesh.points.conservativeResize(next_idx, 3);
+    out_fine_mag.conservativeResize(next_idx, 3);
+    return fine_mesh;
 }
 
 // --- ANALYSE POINT DE BLOCH (VOLUME) ---
@@ -742,7 +819,7 @@ int main(int argc, char* argv[]) {
     std::vector<BlochPointResult> global_bloch_points;
     std::vector<SurfaceSingularityResult> global_surface_singularities;
 
-    // Booleen de synchronisation OpenMP pour exporter base_mesh une seule fois
+    // Booleen de synchronisation OpenMP pour exporter fine_mesh une seule fois
     bool base_mesh_exported = false;
 
     // 4. BOUCLE PRINCIPALE SUR TOUTES LES SOLUTIONS CHRONOLOGIQUES
@@ -788,15 +865,9 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        // [MODIF SILENCIEUSE] Suppression de l'affichage PN-Subdivision
-        /*
-        #pragma omp critical(cout_log)
-        std::cout << "Traitement (PN-Subdivision) de : " << file_path << " (Iter: " << iter << ")\n";
-        */
-
-        // --- AJOUT : SAUVEGARDE DU MAILLAGE AFFINÉ (FINE_MESH) UNE SEULE FOIS ---
+        // --- AJOUT : SAUVEGARDE DU MAILLAGE AFFINÉ (BASE_MESH) UNE SEULE FOIS ---
         // Utilisation d'un bloc critique pour éviter les accès simultanés en écriture fichier par les threads.
-        #pragma omp critical(fine_mesh_export_zone)
+        #pragma omp critical(base_mesh_export_zone)
         {
             if (!base_mesh_exported) {
                 std::ofstream f_mesh("base_mesh.out");

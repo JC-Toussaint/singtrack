@@ -392,6 +392,72 @@ Eigen::MatrixXd compute_node_normals(const Eigen::MatrixXd& points, const std::v
     return node_normals;
 }
 
+// --- APPROCHE A : SUBDIVISION PN-TRIANGLE ET INTERPOLATION DE L'AIMANTATION ---
+Mesh subdivide_surface_pn(const Mesh& original_mesh, const Eigen::MatrixXd& original_mag, Eigen::MatrixXd& out_fine_mag) {
+    Mesh fine_mesh;
+    fine_mesh.points = original_mesh.points;
+    fine_mesh.tetrahedrons = original_mesh.tetrahedrons; 
+
+    out_fine_mag = original_mag; // Initialisation de la matrice d'aimantation fine
+
+    // OPTIM : remplacement de std::map<Edge,int> (O(log N) par opération) par un std::unordered_map
+    // avec une clé entière encodant les deux indices (v1 << 32 | v2) pour des lookups O(1).
+    // Le nombre de milieux d'arêtes est au plus 3 * N_triangles, on pré-alloue en conséquence.
+    auto edge_key = [](int v1, int v2) -> int64_t { return (static_cast<int64_t>(v1) << 32) | static_cast<uint32_t>(v2); };
+    std::unordered_map<int64_t, int> midpoints_map;
+    midpoints_map.reserve(original_mesh.triangles.size() * 3);
+
+    // OPTIM : pré-allocation des nouvelles lignes points/aimantation pour éviter les conservativeResize répétés.
+    // Chaque triangle peut créer au plus 3 nouveaux midpoints (arêtes non partagées).
+    const int N_orig = static_cast<int>(original_mesh.points.rows());
+    const int N_new_max = N_orig + static_cast<int>(original_mesh.triangles.size()) * 3;
+    fine_mesh.points.conservativeResize(N_new_max, 3);
+    out_fine_mag.conservativeResize(N_new_max, 3);
+    int next_idx = N_orig; // Prochain index libre dans les matrices pré-allouées
+
+    auto get_or_create_pn_midpoint = [&](int iA, int iB) {
+        int v1 = std::min(iA, iB); int v2 = std::max(iA, iB);
+        int64_t key = edge_key(v1, v2);
+        auto it = midpoints_map.find(key);
+        if (it != midpoints_map.end()) return it->second;
+
+        Eigen::Vector3d P1 = original_mesh.points.row(v1), P2 = original_mesh.points.row(v2);
+        Eigen::Vector3d N1 = original_mesh.node_normals.row(v1), N2 = original_mesh.node_normals.row(v2);
+
+        // Correction Géométrique PN-Triangle
+        double d1 = (P2 - P1).dot(N1); double d2 = (P1 - P2).dot(N2);
+        Eigen::Vector3d P_corrected = 0.5 * (P1 + P2) + 0.125 * (d1 * N1 + d2 * N2);
+
+        // --- INTERPOLATION PHYSIQUE DE L'AIMANTATION ---
+        Eigen::Vector3d M1 = original_mag.row(v1), M2 = original_mag.row(v2);
+        Eigen::Vector3d M_interpolated = (0.5 * (M1 + M2)).normalized(); // Normalisation stricte |m| = 1
+
+        // OPTIM : écriture directe dans les lignes pré-allouées (pas de realloc)
+        fine_mesh.points.row(next_idx) = P_corrected;
+        out_fine_mag.row(next_idx) = M_interpolated;
+
+        midpoints_map[key] = next_idx;
+        return next_idx++;
+    };
+
+    fine_mesh.triangles.reserve(original_mesh.triangles.size() * 4); // Subdivision 1->4
+    for (const auto& tri : original_mesh.triangles) {
+        int m01 = get_or_create_pn_midpoint(tri[0], tri[1]);
+        int m12 = get_or_create_pn_midpoint(tri[1], tri[2]);
+        int m20 = get_or_create_pn_midpoint(tri[2], tri[0]);
+
+        fine_mesh.triangles.push_back(Eigen::Vector3i(tri[0], m01, m20));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m01, tri[1], m12));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m20, m12, tri[2]));
+        fine_mesh.triangles.push_back(Eigen::Vector3i(m01, m12, m20));
+    }
+
+    // Troncature des matrices aux tailles réelles effectivement utilisées
+    fine_mesh.points.conservativeResize(next_idx, 3);
+    out_fine_mag.conservativeResize(next_idx, 3);
+    return fine_mesh;
+}
+
 // --- ANALYSE POINT DE BLOCH (VOLUME) ---
 // Un point de Bloch est une singularité topologique micromagnétique ponctuelle où l'aimantation s'annule localement (\vec{m} = \vec{0}).
 // On utilise une interpolation affine de l'aimantation à l'intérieur du tétraèdre pour trouver ce zéro et caractériser le champ.
@@ -742,8 +808,8 @@ int main(int argc, char* argv[]) {
     std::vector<BlochPointResult> global_bloch_points;
     std::vector<SurfaceSingularityResult> global_surface_singularities;
 
-    // Booleen de synchronisation OpenMP pour exporter base_mesh une seule fois
-    bool base_mesh_exported = false;
+    // Booleen de synchronisation OpenMP pour exporter fine_mesh une seule fois
+    bool fine_mesh_exported = false;
 
     // 4. BOUCLE PRINCIPALE SUR TOUTES LES SOLUTIONS CHRONOLOGIQUES
     // OPTIM : parallélisation OpenMP des itérations temporelles, qui sont indépendantes entre elles.
@@ -759,7 +825,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::vector<BlochPointResult>>          thread_bloch(N_sol);
     std::vector<std::vector<SurfaceSingularityResult>>  thread_surf(N_sol);
 
-    #pragma omp parallel for schedule(dynamic,1) shared(base_mesh, sol_vec, thread_bloch, thread_surf, base_mesh_exported)
+    #pragma omp parallel for schedule(dynamic,1) shared(base_mesh, sol_vec, thread_bloch, thread_surf, fine_mesh_exported)
     for (int fi = 0; fi < N_sol; ++fi) {
         const auto& [iter, file_path] = sol_vec[fi];
         double current_time = 0.0;
@@ -794,29 +860,36 @@ int main(int argc, char* argv[]) {
         std::cout << "Traitement (PN-Subdivision) de : " << file_path << " (Iter: " << iter << ")\n";
         */
 
+        // --- GÉNÉRATION DU MAILLAGE FIN POUR CE PAS DE TEMPS ---
+        // Note : subdivide_surface_pn est thread-safe (pas de variable globale modifiée)
+        Eigen::MatrixXd fine_mag;
+        Mesh fine_mesh = subdivide_surface_pn(base_mesh, mag, fine_mag);
+        fine_mesh.node_normals = compute_node_normals(fine_mesh.points, fine_mesh.triangles);
+
         // --- AJOUT : SAUVEGARDE DU MAILLAGE AFFINÉ (FINE_MESH) UNE SEULE FOIS ---
         // Utilisation d'un bloc critique pour éviter les accès simultanés en écriture fichier par les threads.
         #pragma omp critical(fine_mesh_export_zone)
         {
-            if (!base_mesh_exported) {
-                std::ofstream f_mesh("base_mesh.out");
-                if (f_mesh.is_open()) {
-                    f_mesh << std::left << std::setw(8) << "#id_node" 
+            if (!fine_mesh_exported) {
+                // [MODIF SILENCIEUSE] L'exportation reste active mais se fait sans bavardage console inutile
+                std::ofstream f_fine("fine_mesh.out");
+                if (f_fine.is_open()) {
+                    f_fine << std::left << std::setw(8) << "#id_node" 
                            << std::right << std::setw(15) << "x" 
                            << std::setw(15) << "y" 
                            << std::setw(15) << "z" << "\n";
-                    for (int i = 0; i < base_mesh.points.rows(); ++i) {
-                        f_mesh << std::left << std::setw(8) << i // Indexation base 0 standard 
+                    for (int i = 0; i < fine_mesh.points.rows(); ++i) {
+                        f_fine << std::left << std::setw(8) << (i + 1) // Indexation base 1 standard pour les fichiers de maillage
                                << std::right << std::fixed << std::setprecision(6)
-                               << std::setw(15) << base_mesh.points(i, 0)
-                               << std::setw(15) << base_mesh.points(i, 1)
-                               << std::setw(15) << base_mesh.points(i, 2) << "\n";
+                               << std::setw(15) << fine_mesh.points(i, 0)
+                               << std::setw(15) << fine_mesh.points(i, 1)
+                               << std::setw(15) << fine_mesh.points(i, 2) << "\n";
                     }
-                    f_mesh.close();
+                    f_fine.close();
                 } else {
-                    std::cerr << "Erreur : Impossible de creer le fichier base_mesh.out\n";
+                    std::cerr << "Erreur : Impossible de creer le fichier fine_mesh.out\n";
                 }
-                base_mesh_exported = true; // Empêche les autres threads de réécrire le fichier
+                fine_mesh_exported = true; // Empêche les autres threads de réécrire le fichier
             }
         }
 
@@ -855,12 +928,12 @@ int main(int argc, char* argv[]) {
         }
 
         // --- ANALYSE SURFACE (Parcours de toutes les facettes triangulaires frontières) ---
-        for (const auto& nodes_idx : base_mesh.triangles) {
+        for (const auto& nodes_idx : fine_mesh.triangles) {
             Eigen::Matrix3d s_coords, s_mag, s_normals; 
             for(int i = 0; i < 3; ++i) {
-                s_coords.col(i) = base_mesh.points.row(nodes_idx[i]);
-                s_mag.col(i) = mag.row(nodes_idx[i]);
-		s_normals.col(i) = base_mesh.node_normals.row(nodes_idx[i]); 
+                s_coords.col(i) = fine_mesh.points.row(nodes_idx[i]);
+                s_mag.col(i) = fine_mag.row(nodes_idx[i]);
+		        s_normals.col(i) = fine_mesh.node_normals.row(nodes_idx[i]); 
              }
 
             auto res_surf = analyze_surface_singularity(iter, current_time, s_coords, s_mag, s_normals);
