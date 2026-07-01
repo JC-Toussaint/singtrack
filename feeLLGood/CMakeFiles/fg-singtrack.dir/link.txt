@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG "CMakeFiles/fg-singtrack.dir/fg-singtrack.cc.o" -o fg-singtrack  /usr/lib/x86_64-linux-gnu/libgmsh.so 
