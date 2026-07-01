@@ -1,4 +1,5 @@
-simulations
-simulations/*
-feeLLGood/CMakeFiles
-st_feellgood/CMakeFiles
+simulations/
+feeLLGood/CMakeFiles/
+feeLLGood/CMakeCache.txt
+st_feellgood/CMakeFiles/
+st_feellgood/CMakeCache.txt

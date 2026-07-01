@@ -788,38 +788,6 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        // [MODIF SILENCIEUSE] Suppression de l'affichage PN-Subdivision
-        /*
-        #pragma omp critical(cout_log)
-        std::cout << "Traitement (PN-Subdivision) de : " << file_path << " (Iter: " << iter << ")\n";
-        */
-
-        // --- AJOUT : SAUVEGARDE DU MAILLAGE AFFINÉ (FINE_MESH) UNE SEULE FOIS ---
-        // Utilisation d'un bloc critique pour éviter les accès simultanés en écriture fichier par les threads.
-        #pragma omp critical(fine_mesh_export_zone)
-        {
-            if (!base_mesh_exported) {
-                std::ofstream f_mesh("base_mesh.out");
-                if (f_mesh.is_open()) {
-                    f_mesh << std::left << std::setw(8) << "#id_node" 
-                           << std::right << std::setw(15) << "x" 
-                           << std::setw(15) << "y" 
-                           << std::setw(15) << "z" << "\n";
-                    for (int i = 0; i < base_mesh.points.rows(); ++i) {
-                        f_mesh << std::left << std::setw(8) << i // Indexation base 0 standard 
-                               << std::right << std::fixed << std::setprecision(6)
-                               << std::setw(15) << base_mesh.points(i, 0)
-                               << std::setw(15) << base_mesh.points(i, 1)
-                               << std::setw(15) << base_mesh.points(i, 2) << "\n";
-                    }
-                    f_mesh.close();
-                } else {
-                    std::cerr << "Erreur : Impossible de creer le fichier base_mesh.out\n";
-                }
-                base_mesh_exported = true; // Empêche les autres threads de réécrire le fichier
-            }
-        }
-
         // --- ANALYSE VOLUME (Parcours exhaustif de tous les tétraèdres du domaine) ---
         for (const auto& nodes_idx : base_mesh.tetrahedrons) {
             Matrix34d t_coords, t_mag; 
